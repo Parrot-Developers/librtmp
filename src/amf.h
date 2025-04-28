@@ -46,9 +46,9 @@
  * Encode an AMF message into the given buffer.
  *
  * Available formatters & associated arg type:
- * - '%f' : Number (double)
- * - '%u' : Boolean (uint8_t)
- * - '%s' : String (const char *).
+ * - '%f': Number (double)
+ * - '%u': Boolean (uint8_t)
+ * - '%s': String (const char *).
  *   -> '%s' is also used as property names inside AMF objects
  * - '{': Start of an AMF object. (no arg)
  *     AMF Objects have pairs of properties name/values, which must be both
@@ -86,15 +86,22 @@ char *amf_get_msg_name(struct rtmp_buffer *buf, double *id);
 
 /* Low level getters */
 int amf_get_number(struct rtmp_buffer *buf, double *value);
+
 int amf_get_boolean(struct rtmp_buffer *buf, uint8_t *value);
+
 int amf_get_string(struct rtmp_buffer *buf,
 		   char **string); /* Allocates memory */
+
 int amf_get_property(struct rtmp_buffer *buf,
 		     char **key); /* Allocates memory */
+
 int amf_get_object_start(struct rtmp_buffer *buf);
+
 int amf_get_null(struct rtmp_buffer *buf);
+
 int amf_get_object_end(struct rtmp_buffer *buf);
 
 int amf_skip_data(struct rtmp_buffer *buf);
+
 
 #endif /* _AMF_H_ */

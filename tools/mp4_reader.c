@@ -40,6 +40,7 @@ struct mp4_reader {
 	uint32_t loop_ts;
 };
 
+
 const char *mp4_data_type_str(enum mp4_data_type type)
 {
 	switch (type) {
@@ -55,6 +56,7 @@ const char *mp4_data_type_str(enum mp4_data_type type)
 		return "UNKNOWN";
 	}
 }
+
 
 static void video_timer_cb(struct pomp_timer *timer, void *userdata)
 {
@@ -73,8 +75,24 @@ static void video_timer_cb(struct pomp_timer *timer, void *userdata)
 					 0,
 					 &ts);
 	if (ret != 0) {
-		ULOG_ERRNO("mp4_demux_get_track_next_sample", -ret);
-		return;
+		void *tmp = realloc(r->video_sample_buffer, ts.size);
+		if (tmp == NULL) {
+			ULOG_ERRNO("realloc", ENOMEM);
+			return;
+		}
+		r->video_sample_buffer = tmp;
+		r->vsb_len = ts.size;
+
+		ret = mp4_demux_get_track_sample(r->demux,
+						 r->video_track_id,
+						 1,
+						 r->video_sample_buffer,
+						 r->vsb_len,
+						 NULL,
+						 0,
+						 &ts);
+		if (ret != 0)
+			ULOG_ERRNO("mp4_demux_get_track_next_sample", -ret);
 	}
 
 	dts_ms = mp4_sample_time_to_usec(ts.dts, r->video_track_timescale) /
@@ -103,6 +121,7 @@ static void video_timer_cb(struct pomp_timer *timer, void *userdata)
 
 	pomp_timer_set(r->video_timer, next_dts_ms - dts_ms);
 }
+
 
 static void audio_timer_cb(struct pomp_timer *timer, void *userdata)
 {
@@ -139,7 +158,7 @@ static void audio_timer_cb(struct pomp_timer *timer, void *userdata)
 	dts_ms = mp4_sample_time_to_usec(ts.dts, r->audio_track_timescale) /
 		 1000;
 	frame_ts = dts_ms + r->loop_ts;
-	r->cbs.element_cb(r->video_sample_buffer,
+	r->cbs.element_cb(r->audio_sample_buffer,
 			  ts.size,
 			  MP4_AUDIO,
 			  frame_ts,
@@ -153,6 +172,7 @@ static void audio_timer_cb(struct pomp_timer *timer, void *userdata)
 
 	pomp_timer_set(r->audio_timer, next_dts_ms - dts_ms);
 }
+
 
 struct mp4_reader *mp4_open_file(const char *path,
 				 struct pomp_loop *loop,
@@ -189,7 +209,7 @@ struct mp4_reader *mp4_open_file(const char *path,
 	}
 
 	r->asb_len = 1024;
-	r->audio_sample_buffer = malloc(r->vsb_len);
+	r->audio_sample_buffer = malloc(r->asb_len);
 	if (!r->audio_sample_buffer) {
 		ULOG_ERRNO("malloc", ENOMEM);
 		goto error;
@@ -220,7 +240,7 @@ struct mp4_reader *mp4_open_file(const char *path,
 		mp4_demux_get_track_info(r->demux, track, &info);
 		if (info.type == MP4_TRACK_TYPE_VIDEO) {
 			found_video = 1;
-			ULOGI("Video track with id %d", track);
+			ULOGI("video track with id %d", track);
 			r->video_track = track;
 			r->video_track_id = info.id;
 			r->video_track_timescale = info.timescale;
@@ -234,11 +254,11 @@ struct mp4_reader *mp4_open_file(const char *path,
 	}
 
 	if (!found_video) {
-		ULOGE("No video track found !");
+		ULOGE("no video track found !");
 		goto error;
 	}
 	if (!found_audio) {
-		ULOGW("No audio track, using dummy audio track");
+		ULOGW("no audio track, using dummy audio track");
 		r->dummy_audio = 1;
 	}
 
@@ -247,6 +267,7 @@ error:
 	mp4_close_file(r);
 	return NULL;
 }
+
 
 void mp4_close_file(struct mp4_reader *r)
 {
@@ -271,6 +292,7 @@ void mp4_close_file(struct mp4_reader *r)
 	free(r);
 }
 
+
 static void mp4_config_idle(void *userdata)
 {
 	struct mp4_reader *r = userdata;
@@ -280,7 +302,7 @@ static void mp4_config_idle(void *userdata)
 
 	struct mp4_video_decoder_config vdc;
 
-	uint8_t avcc[64];
+	uint8_t avcc[128];
 	unsigned int avcc_len = sizeof(avcc);
 	uint8_t *asc;
 	unsigned int asc_len;
@@ -326,6 +348,7 @@ static void mp4_config_idle(void *userdata)
 	pomp_timer_set(r->audio_timer, 1);
 	pomp_timer_set(r->video_timer, 1);
 }
+
 
 int mp4_start_read(struct mp4_reader *r, int loop)
 {

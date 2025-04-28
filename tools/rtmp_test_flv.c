@@ -41,6 +41,7 @@ ULOG_DECLARE_TAG(rtmp_test);
 /* Define to 0 to skip RTMP connection & run only locally */
 #define DO_SEND 1
 
+
 struct rtmp_test_ctx {
 	int run;
 	int rtmp_connected;
@@ -49,41 +50,50 @@ struct rtmp_test_ctx {
 	struct flv_reader *reader;
 };
 
+
 static void socket_cb(int fd, void *userdata)
 {
-	ULOGI("Socket CB(%d)", fd);
+	ULOGI("socket CB(%d)", fd);
 }
 
-static void connection_state(enum rtmp_connection_state state, void *userdata)
+
+static void
+connection_state(enum rtmp_client_conn_state state,
+		 enum rtmp_client_disconnection_reason disconnection_reason,
+		 void *userdata)
 {
 	struct rtmp_test_ctx *ctx = userdata;
-	ULOGI("Connection state : %s", rtmp_connection_state_to_string(state));
+	ULOGI("connection state: %s", rtmp_client_conn_state_str(state));
 
-	if (state != RTMP_DISCONNECTED)
+	if (state != RTMP_CLIENT_CONN_STATE_DISCONNECTED)
 		ctx->rtmp_connected = 1;
 
-	if (state == RTMP_CONNECTED) {
+	if (state == RTMP_CLIENT_CONN_STATE_CONNECTED) {
 		int ret;
-		ULOGI("RTMP Connected, start reading flv file");
+		ULOGI("RTMP connected, start reading flv file");
 		ret = flv_start_read(ctx->reader, 1.0, 1);
 		if (ret != 0)
 			ULOG_ERRNO("flv_start_read", -ret);
-	} else if (state == RTMP_DISCONNECTED && ctx->rtmp_connected) {
-		ULOGI("Lost RTMP connection");
+	} else if (state == RTMP_CLIENT_CONN_STATE_DISCONNECTED &&
+		   ctx->rtmp_connected) {
+		ULOGI("lost RTMP connection");
 		ctx->run = 0;
 		pomp_loop_wakeup(ctx->loop);
 	}
 }
 
+
 static void peer_bw_changed(uint32_t bandwidth, void *userdata)
 {
-	ULOGI("Peer BW changed to %" PRIu32 " Bytes per second", bandwidth);
+	ULOGI("peer BW changed to %" PRIu32 " Bytes per second", bandwidth);
 }
+
 
 static void data_unref(uint8_t *data, void *buffer_userdata, void *userdata)
 {
 	free(buffer_userdata);
 }
+
 
 static const struct rtmp_callbacks rtmp_cbs = {
 	.socket_cb = socket_cb,
@@ -91,6 +101,7 @@ static const struct rtmp_callbacks rtmp_cbs = {
 	.peer_bw_changed = peer_bw_changed,
 	.data_unref = data_unref,
 };
+
 
 static void flv_tag(uint8_t *buffer,
 		    size_t len,
@@ -101,14 +112,15 @@ static void flv_tag(uint8_t *buffer,
 	int ret = 0;
 	uint8_t *buf;
 	struct rtmp_test_ctx *ctx = userdata;
-	ULOGI("Got a tag of type %s, len %zu, timestamp %" PRIu32 "ms",
+	ULOGI("got a tag of type %s, len %zu, timestamp %" PRIu32 "ms",
 	      flv_data_type_str(type),
 	      len,
 	      timestamp);
 
 	buf = malloc(len);
 	if (!buf) {
-		ULOGE("Whoopsie, ENOMEM !");
+		ret = -ENOMEM;
+		ULOG_ERRNO("malloc", -ret);
 		return;
 	}
 	memcpy(buf, buffer, len);
@@ -145,24 +157,28 @@ static void flv_tag(uint8_t *buffer,
 		free(buf);
 		ULOG_ERRNO("send flv tag", -ret);
 	} else if (ret > 0) {
-		ULOGI("Already %d frames waiting", ret);
+		ULOGI("already %d frames waiting", ret);
 	}
 }
+
 
 static void flv_eof(void *userdata)
 {
 	struct rtmp_test_ctx *ctx = userdata;
-	ULOGI("End of FLV file");
+	ULOGI("end of FLV file");
 	ctx->run = 0;
 	pomp_loop_wakeup(ctx->loop);
 }
+
 
 static const struct flv_reader_cbs flv_cbs = {
 	.tag_cb = flv_tag,
 	.eof_cb = flv_eof,
 };
 
+
 static struct rtmp_test_ctx ctx;
+
 
 static void sighandler(int signal)
 {
@@ -172,6 +188,7 @@ static void sighandler(int signal)
 		exit(1);
 	pomp_loop_wakeup(ctx.loop);
 }
+
 
 static void sighandler_pipe(int signal)
 {
@@ -186,6 +203,7 @@ static void sighandler_pipe(int signal)
 	exit(1);
 }
 
+
 int main(int argc, char *argv[])
 {
 	char *url;
@@ -195,7 +213,7 @@ int main(int argc, char *argv[])
 	int status_code = EXIT_SUCCESS;
 
 	if (argc < 3) {
-		ULOGE("Usage : %s flv_file url", argv[0]);
+		ULOGE("usage: %s flv_file url", argv[0]);
 		status_code = EXIT_FAILURE;
 		goto exit;
 	}
@@ -242,12 +260,13 @@ int main(int argc, char *argv[])
 	flv_start_read(ctx.reader, 1.0, 0);
 #endif
 
-	ULOGI("Starting loop");
+	ULOGI("starting loop");
 	while (ctx.run)
 		pomp_loop_wait_and_process(ctx.loop, -1);
-	ULOGI("Ending loop");
+	ULOGI("ending loop");
 
-	ret = rtmp_client_disconnect(ctx.rtmp);
+	ret = rtmp_client_disconnect(
+		ctx.rtmp, RTMP_CLIENT_DISCONNECTION_REASON_CLIENT_REQUEST);
 	if (ret != 0) {
 		ULOG_ERRNO("rtmp_client_disconnect", -ret);
 		status_code = EXIT_FAILURE;

@@ -23,8 +23,8 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef _FLV_READER_H_
-#define _FLV_READER_H_
+#ifndef _MP4_READER_H_
+#define _MP4_READER_H_
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -32,33 +32,44 @@
 struct pomp_loop;
 struct pomp_timer;
 
-enum flv_data_type {
-	FLV_META,
-	FLV_AUDIO,
-	FLV_VIDEO,
-	FLV_UNKNOWN,
+
+enum mp4_data_type {
+	MP4_AVCC,
+	MP4_ASC,
+	MP4_VIDEO,
+	MP4_AUDIO,
 };
 
-struct flv_reader_cbs {
-	void (*tag_cb)(uint8_t *buffer,
-		       size_t len,
-		       enum flv_data_type type,
-		       uint32_t timestamp,
-		       void *userdata);
 
+struct mp4_reader_cbs {
+	void (*config_cb)(double duration,
+			  int width,
+			  int height,
+			  double framerate,
+			  int audiosamplerate,
+			  int audiosamplesize,
+			  void *userdata);
+	void (*element_cb)(uint8_t *buffer,
+			   size_t len,
+			   enum mp4_data_type type,
+			   uint32_t timestamp,
+			   void *userdata);
 	void (*eof_cb)(void *userdata);
 };
 
-struct flv_reader;
 
-struct flv_reader *flv_open_file(const char *path,
+struct mp4_reader;
+
+
+struct mp4_reader *mp4_open_file(const char *path,
 				 struct pomp_loop *loop,
-				 const struct flv_reader_cbs *cbs,
+				 const struct mp4_reader_cbs *cbs,
 				 void *userdata);
-void flv_close_file(struct flv_reader *r);
+void mp4_close_file(struct mp4_reader *r);
 
-int flv_start_read(struct flv_reader *r, float speed, int loop);
+int mp4_start_read(struct mp4_reader *r, int loop);
 
-const char *flv_data_type_str(enum flv_data_type type);
+const char *mp4_data_type_str(enum mp4_data_type type);
 
-#endif /* _FLV_READER_H_ */
+
+#endif /* _MP4_READER_H_ */

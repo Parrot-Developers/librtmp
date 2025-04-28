@@ -26,20 +26,26 @@
 #ifndef _RTMP_CHUNK_STREAM_H_
 #define _RTMP_CHUNK_STREAM_H_
 
+#include <stdbool.h>
+#include <transport-socket/tskt.h>
+
 #include "rtmp_internal.h"
 
 struct rtmp_chunk_stream;
 struct pomp_loop;
 
+
 struct rtmp_chunk_cbs {
 	void (*peer_bw_changed)(uint32_t bandwidth, void *userdata);
 	void (*amf_msg)(struct rtmp_buffer *data, void *userdata);
 	void (*data_sent)(uint8_t *data, void *data_userdata, void *userdata);
-	void (*disconnected)(void *userdata);
+	void (*disconnected)(void *userdata,
+			     enum rtmp_client_disconnection_reason reason);
 };
 
+
 struct rtmp_chunk_stream *new_chunk_stream(struct pomp_loop *loop,
-					   int sockfd,
+					   struct tskt_socket *tsock,
 					   const struct rtmp_chunk_cbs *cbs,
 					   void *userdata);
 
@@ -52,19 +58,22 @@ int send_metadata(struct rtmp_chunk_stream *stream,
 		  void *frame_userdata);
 int send_video_frame(struct rtmp_chunk_stream *stream,
 		     struct rtmp_buffer *frame,
-		     uint32_t stream_id,
 		     uint32_t timestamp,
 		     int is_meta,
 		     int is_key,
 		     void *frame_userdata);
 int send_audio_data(struct rtmp_chunk_stream *stream,
 		    struct rtmp_buffer *data,
-		    uint32_t stream_id,
 		    uint32_t timestamp,
 		    int is_meta,
 		    void *frame_userdata);
 int send_amf_message(struct rtmp_chunk_stream *stream, struct rtmp_buffer *msg);
 
+int flush_chunk_stream(struct rtmp_chunk_stream *stream);
+
 int delete_chunk_stream(struct rtmp_chunk_stream *stream);
+
+int store_message_stream_id(struct rtmp_chunk_stream *stream, uint32_t msid);
+
 
 #endif /* _RTMP_CHUNK_STREAM_H_ */

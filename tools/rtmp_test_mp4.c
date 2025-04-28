@@ -41,6 +41,7 @@ ULOG_DECLARE_TAG(rtmp_test);
 /* Define to 0 to skip RTMP connection & run only locally */
 #define DO_SEND 1
 
+
 struct rtmp_test_ctx {
 	int run;
 	int rtmp_connected;
@@ -49,41 +50,50 @@ struct rtmp_test_ctx {
 	struct mp4_reader *reader;
 };
 
+
 static void socket_cb(int fd, void *userdata)
 {
-	ULOGI("Socket CB(%d)", fd);
+	ULOGI("socket CB(%d)", fd);
 }
 
-static void connection_state(enum rtmp_connection_state state, void *userdata)
+
+static void
+connection_state(enum rtmp_client_conn_state state,
+		 enum rtmp_client_disconnection_reason disconnection_reason,
+		 void *userdata)
 {
 	struct rtmp_test_ctx *ctx = userdata;
-	ULOGI("Connection state : %s", rtmp_connection_state_to_string(state));
+	ULOGI("connection state: %s", rtmp_client_conn_state_str(state));
 
-	if (state != RTMP_DISCONNECTED)
+	if (state != RTMP_CLIENT_CONN_STATE_DISCONNECTED)
 		ctx->rtmp_connected = 1;
 
-	if (state == RTMP_CONNECTED) {
+	if (state == RTMP_CLIENT_CONN_STATE_CONNECTED) {
 		int ret;
-		ULOGI("RTMP Connected, start reading mp4 file");
+		ULOGI("RTMP connected, start reading mp4 file");
 		ret = mp4_start_read(ctx->reader, 1);
 		if (ret != 0)
 			ULOG_ERRNO("mp4_start_read", -ret);
-	} else if (state == RTMP_DISCONNECTED && ctx->rtmp_connected) {
-		ULOGI("Lost RTMP connection");
+	} else if (state == RTMP_CLIENT_CONN_STATE_DISCONNECTED &&
+		   ctx->rtmp_connected) {
+		ULOGI("lost RTMP connection");
 		ctx->run = 0;
 		pomp_loop_wakeup(ctx->loop);
 	}
 }
 
+
 static void peer_bw_changed(uint32_t bandwidth, void *userdata)
 {
-	ULOGI("Peer BW changed to %" PRIu32 " Bytes per second", bandwidth);
+	ULOGI("peer BW changed to %" PRIu32 " Bytes per second", bandwidth);
 }
+
 
 static void data_unref(uint8_t *data, void *buffer_userdata, void *userdata)
 {
 	free(buffer_userdata);
 }
+
 
 static const struct rtmp_callbacks rtmp_cbs = {
 	.socket_cb = socket_cb,
@@ -91,6 +101,7 @@ static const struct rtmp_callbacks rtmp_cbs = {
 	.peer_bw_changed = peer_bw_changed,
 	.data_unref = data_unref,
 };
+
 
 static void mp4_config(double duration,
 		       int width,
@@ -103,7 +114,7 @@ static void mp4_config(double duration,
 	int ret;
 	struct rtmp_test_ctx *ctx = userdata;
 
-	ULOGW("MP4_CONFIG : [[ duration=%f, res=%dx%d, framerate=%f,"
+	ULOGW("MP4_CONFIG: [[ duration=%f, res=%dx%d, framerate=%f,"
 	      "audio rate=%dHz, audio size=%dbits ]]",
 	      duration,
 	      width,
@@ -123,6 +134,7 @@ static void mp4_config(double duration,
 		ULOG_ERRNO("rtmp_client_send_metadata", -ret);
 }
 
+
 static void mp4_element(uint8_t *buffer,
 			size_t len,
 			enum mp4_data_type type,
@@ -132,14 +144,15 @@ static void mp4_element(uint8_t *buffer,
 	int ret = 0;
 	uint8_t *buf;
 	struct rtmp_test_ctx *ctx = userdata;
-	ULOGI("Got an element of type %s, len %zu, timestamp %" PRIu32 "ms",
+	ULOGI("got an element of type %s, len %zu, timestamp %" PRIu32 "ms",
 	      mp4_data_type_str(type),
 	      len,
 	      timestamp);
 
 	buf = malloc(len);
 	if (!buf) {
-		ULOGE("Whoopsie, ENOMEM !");
+		ret = -ENOMEM;
+		ULOG_ERRNO("malloc", -ret);
 		return;
 	}
 	memcpy(buf, buffer, len);
@@ -167,17 +180,19 @@ static void mp4_element(uint8_t *buffer,
 		free(buf);
 		ULOG_ERRNO("send mp4 element", -ret);
 	} else if (ret > 0) {
-		ULOGI("Already %d frames waiting", ret);
+		ULOGI("already %d frames waiting", ret);
 	}
 }
+
 
 static void mp4_eof(void *userdata)
 {
 	struct rtmp_test_ctx *ctx = userdata;
-	ULOGI("End of MP4 file");
+	ULOGI("end of MP4 file");
 	ctx->run = 0;
 	pomp_loop_wakeup(ctx->loop);
 }
+
 
 static const struct mp4_reader_cbs mp4_cbs = {
 	.config_cb = mp4_config,
@@ -185,7 +200,9 @@ static const struct mp4_reader_cbs mp4_cbs = {
 	.eof_cb = mp4_eof,
 };
 
+
 static struct rtmp_test_ctx ctx;
+
 
 static void sighandler(int signal)
 {
@@ -195,6 +212,7 @@ static void sighandler(int signal)
 		exit(1);
 	pomp_loop_wakeup(ctx.loop);
 }
+
 
 static void sighandler_pipe(int signal)
 {
@@ -209,6 +227,7 @@ static void sighandler_pipe(int signal)
 	exit(1);
 }
 
+
 int main(int argc, char *argv[])
 {
 	char *url;
@@ -218,7 +237,7 @@ int main(int argc, char *argv[])
 	int status_code = EXIT_SUCCESS;
 
 	if (argc < 3) {
-		ULOGE("Usage : %s mp4_file url", argv[0]);
+		ULOGE("usage: %s mp4_file url", argv[0]);
 		status_code = EXIT_FAILURE;
 		goto exit;
 	}
@@ -265,12 +284,13 @@ int main(int argc, char *argv[])
 	mp4_start_read(ctx.reader, 0);
 #endif
 
-	ULOGI("Starting loop");
+	ULOGI("starting loop");
 	while (ctx.run)
 		pomp_loop_wait_and_process(ctx.loop, -1);
-	ULOGI("Ending loop");
+	ULOGI("ending loop");
 
-	ret = rtmp_client_disconnect(ctx.rtmp);
+	ret = rtmp_client_disconnect(
+		ctx.rtmp, RTMP_CLIENT_DISCONNECTION_REASON_CLIENT_REQUEST);
 	if (ret != 0) {
 		ULOG_ERRNO("rtmp_client_disconnect", -ret);
 		status_code = EXIT_FAILURE;

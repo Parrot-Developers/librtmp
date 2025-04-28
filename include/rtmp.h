@@ -44,26 +44,89 @@ extern "C" {
 #	define RTMP_API
 #endif /* !RTP_API_EXPORTS */
 
+#define RTMP_MAX_QUEUE_SIZE 10
+
+
 /* Forward declarations */
 struct rtmp_client;
 struct pomp_loop;
 
+
 /** Connection state */
-enum rtmp_connection_state {
-	RTMP_DISCONNECTED, /**< Client is disconnected */
-	RTMP_CONNECTING, /**< Connection in progress */
-	RTMP_CONNECTED, /**< Client is connected */
+enum rtmp_client_conn_state {
+	/* Client is disconnected */
+	RTMP_CLIENT_CONN_STATE_DISCONNECTED = 0,
+
+	/* Connection in progress */
+	RTMP_CLIENT_CONN_STATE_CONNECTING,
+
+	/* Client is connected */
+	RTMP_CLIENT_CONN_STATE_CONNECTED,
 };
+
+
+/** Disconnection reason */
+enum rtmp_client_disconnection_reason {
+	/* Unknown disconnection reason */
+	RTMP_CLIENT_DISCONNECTION_REASON_UNKNOWN = 0,
+
+	/* Client requested disconnection */
+	RTMP_CLIENT_DISCONNECTION_REASON_CLIENT_REQUEST,
+
+	/* Server requested disconnection */
+	RTMP_CLIENT_DISCONNECTION_REASON_SERVER_REQUEST,
+
+	/* Network error */
+	RTMP_CLIENT_DISCONNECTION_REASON_NETWORK_ERROR,
+
+	/* Connection refused by the server */
+	RTMP_CLIENT_DISCONNECTION_REASON_REFUSED,
+
+	/* Server is already in use */
+	RTMP_CLIENT_DISCONNECTION_REASON_ALREADY_IN_USE,
+
+	/* Timeout */
+	RTMP_CLIENT_DISCONNECTION_REASON_TIMEOUT,
+
+	/* Internal error */
+	RTMP_CLIENT_DISCONNECTION_REASON_INTERNAL_ERROR,
+};
+
 
 /**
  * Gets the string description of a connection state.
  *
- * @param state : state to convert.
+ * @param state: state to convert.
  *
  * @return string description of the connection state.
  */
 RTMP_API const char *
-rtmp_connection_state_to_string(enum rtmp_connection_state state);
+rtmp_client_conn_state_str(enum rtmp_client_conn_state state);
+
+
+/**
+ * Gets the string description of a disconnection reason.
+ *
+ * @param reason: state to convert.
+ *
+ * @return string description of the disconnection reason.
+ */
+RTMP_API const char *rtmp_client_disconnection_reason_str(
+	enum rtmp_client_disconnection_reason reason);
+
+
+/**
+ * Anonymize an RTMP URI.
+ *
+ * The returned string is allocated by the function and it is up to the caller
+ * to free it when no longer needed.
+ *
+ * @param uri: URI to anonymize
+ * @param anonymized: the anonymized URI (output)
+ *
+ * @return 0 on success, negative errno on error.
+ */
+RTMP_API int rtmp_anonymize_uri(const char *uri, char **anonymized);
 
 
 /**
@@ -73,34 +136,37 @@ struct rtmp_callbacks {
 	/**
 	 * Callback called on socket creation. (optional)
 	 *
-	 * @param fd : the created socket file descriptor.
-	 * @param userdata : userdata passed in rtmp_client_new.
+	 * @param fd: the created socket file descriptor.
+	 * @param userdata: userdata passed in rtmp_client_new.
 	 */
 	void (*socket_cb)(int fd, void *userdata);
 
 	/**
 	 * Callback called when the connection state changes. (mandatory)
 	 *
-	 * When this callback is called with RTMP_CONNECTED, it is safe to call
-	 * the rtmp_client_send_xxx() functions.
-	 * The rtmp_client won't try to automatically reconnect when
-	 * disconnected.
+	 * When this callback is called with RTMP_CLIENT_CONN_STATE_CONNECTED,
+	 * it is safe to call the rtmp_client_send_xxx() functions. The
+	 * rtmp_client won't try to automatically reconnect when disconnected.
 	 *
-	 * @param state : the client connection state.
-	 * @param userdata : userdata passed in rtmp_client_new.
+	 * @param state: the client connection state.
+	 * @param disconnection_reason: the disconnection reason (unset when
+	 * state is not RTMP_CLIENT_CONN_STATE_DISCONNECTED)
+	 * @param userdata: userdata passed in rtmp_client_new.
 	 */
-	void (*connection_state)(enum rtmp_connection_state state,
-				 void *userdata);
+	void (*connection_state)(
+		enum rtmp_client_conn_state state,
+		enum rtmp_client_disconnection_reason disconnection_reason,
+		void *userdata);
 
 	/**
 	 * Callback called when the peer (the rtmp server) sends a new bandwidth
-	 * limit message.
+	 * limit message. (optional)
 	 *
 	 * This bandwidth limit may be higher than the actual network capacity,
 	 * but is an upper bandwidth limit from the receiver.
 	 *
-	 * @param bandwidth : the max bandwidth supported by the server (B/s).
-	 * @param userdata : userdata passed in rtmp_client_new.
+	 * @param bandwidth: the max bandwidth supported by the server (B/s).
+	 * @param userdata: userdata passed in rtmp_client_new.
 	 */
 	void (*peer_bw_changed)(uint32_t bandwidth, void *userdata);
 
@@ -108,24 +174,25 @@ struct rtmp_callbacks {
 	 * Callback called when a metadata/frame/audio buffer is fully sent and
 	 * can be reused. (mandatory)
 	 *
-	 * @param data : the data which is no longer needed by rtmp_client.
-	 * @param buffer_userdata : user data passed along the buffer in a
+	 * @param data: the data which is no longer needed by rtmp_client.
+	 * @param buffer_userdata: user data passed along the buffer in a
 	 * rtmp_client_send_xxx() function.
-	 * @param userdata : userdata passed in rtmp_client_new.
+	 * @param userdata: userdata passed in rtmp_client_new.
 	 */
 	void (*data_unref)(uint8_t *data,
 			   void *buffer_userdata,
 			   void *userdata);
 };
 
+
 /**
  * Creates a new rtmp_client.
  *
- * @param loop : pomp_loop which will be used by the client. Must be externally
+ * @param loop: pomp_loop which will be used by the client. Must be externally
  * provided & run (no fallback to an internal loop).
- * @param cbs : the callbacks that the client will use to communicate with the
+ * @param cbs: the callbacks that the client will use to communicate with the
  * application. Some callbacks are mandatory.
- * @param userdata : an opaque piece of data passed back to the callbacks.
+ * @param userdata: an opaque piece of data passed back to the callbacks.
  *
  * @return rtmp_client structure or NULL in case of error.
  */
@@ -133,52 +200,68 @@ RTMP_API struct rtmp_client *rtmp_client_new(struct pomp_loop *loop,
 					     const struct rtmp_callbacks *cbs,
 					     void *userdata);
 
+
 /**
  * Destroys an rtmp_client.
  *
  * If the RTMP client is still connected, it is disconnected first.
  *
- * @param client : the rtmp_client to destroy.
+ * @param client: the rtmp_client to destroy.
  */
 RTMP_API void rtmp_client_destroy(struct rtmp_client *client);
+
 
 /**
  * Connects an rtmp_client to the given rtmp URL.
  *
  * If the client is already connected or connecting, an error is returned.
  *
- * @param client : the rtmp_client to connect.
- * @param url : the rtmp url to connect to.
+ * @param client: the rtmp_client to connect.
+ * @param url: the rtmp url to connect to.
  *
  * @return 0 on success, negative errno on error.
  */
 RTMP_API int rtmp_client_connect(struct rtmp_client *client, const char *url);
 
+
 /**
  * Disconnects an rtmp_client.
  *
- * If used when the client is in RTMP_CONNECTING state, this function will abort
- * the connection.
+ * If used when the client is in RTMP_CLIENT_CONN_STATE_CONNECTING state, this
+ * function will abort the connection.
  *
- * @param client : the rtmp_client to disconnect.
+ * @param client: the rtmp_client to disconnect.
+ * @param reason: the reason of the disconnection (optional, can be UNKNOWN).
  *
  * @return 0 on success, negative errno on error.
  */
-RTMP_API int rtmp_client_disconnect(struct rtmp_client *client);
+RTMP_API int
+rtmp_client_disconnect(struct rtmp_client *client,
+		       enum rtmp_client_disconnection_reason reason);
+
+
+/**
+ * Flush all pending frames of an rtmp_client.
+ *
+ * @param client: the rtmp_client to flush.
+ *
+ * @return 0 on success, negative errno on error.
+ */
+RTMP_API int rtmp_client_flush(struct rtmp_client *client);
 
 
 /**
  * Sends a metadata packet to the server.
  *
- * This function must be called on an RTMP_CONNECTED client.
+ * This function must be called on an RTMP_CLIENT_CONN_STATE_CONNECTED client.
  *
- * @param client : the connected rtmp_client which will send the data.
- * @param duration : media duration in seconds (0 for unlimited duration).
- * @param width : video width in pixels.
- * @param height : video height in pixels.
- * @param framerate : video nominal framerate. If 0, "29.97" will be sent.
- * @param audio_sample_rate : audio sample rate, in Hz.
- * @param audio_sample_size : audio sample size, in bits.
+ * @param client: the connected rtmp_client which will send the data.
+ * @param duration: media duration in seconds (0 for unlimited duration).
+ * @param width: video width in pixels.
+ * @param height: video height in pixels.
+ * @param framerate: video nominal framerate. If 0, "29.97" will be sent.
+ * @param audio_sample_rate: audio sample rate, in Hz.
+ * @param audio_sample_size: audio sample size, in bits.
  *
  * @return the number of waiting metadata/audio frames on success, negative
  * errno on error.
@@ -195,14 +278,14 @@ RTMP_API int rtmp_client_send_metadata(struct rtmp_client *client,
 /**
  * Sends a metadata packet to the server.
  *
- * This function must be called on an RTMP_CONNECTED client.
+ * This function must be called on an RTMP_CLIENT_CONN_STATE_CONNECTED client.
  *
- * @param client : the connected rtmp_client which will send the data.
- * @param buf : pointer to an AMF0-encoded metadata buffer.
- * @param len : length of the AMF0-encoded metadata buffer.
- * @param timestamp : timestamp of the metadata, in milliseconds, from the rtmp
+ * @param client: the connected rtmp_client which will send the data.
+ * @param buf: pointer to an AMF0-encoded metadata buffer.
+ * @param len: length of the AMF0-encoded metadata buffer.
+ * @param timestamp: timestamp of the metadata, in milliseconds, from the rtmp
  * connection.
- * @param frame_userdata : userdata passed back to the data_unref() callback.
+ * @param frame_userdata: userdata passed back to the data_unref() callback.
  * buf must NOT be changed before being passed to data_unref().
  *
  * @return the number of waiting metadata/audio frames on success, negative
@@ -214,15 +297,16 @@ RTMP_API int rtmp_client_send_packedmetadata(struct rtmp_client *client,
 					     uint32_t timestamp,
 					     void *frame_userdata);
 
+
 /**
  * Sends a video avcC configuration structure to the server.
  *
- * This function must be called on an RTMP_CONNECTED client.
+ * This function must be called on an RTMP_CLIENT_CONN_STATE_CONNECTED client.
  *
- * @param client : the connected rtmp_client which will send the data.
- * @param buf : pointer to an avcC buffer (See ISO 14496-15, 5.2.4.1.).
- * @param len : length of the avcC buffer.
- * @param frame_userdata : userdata passed back to the data_unref() callback.
+ * @param client: the connected rtmp_client which will send the data.
+ * @param buf: pointer to an avcC buffer (See ISO 14496-15, 5.2.4.1.).
+ * @param len: length of the avcC buffer.
+ * @param frame_userdata: userdata passed back to the data_unref() callback.
  * buf must NOT be changed before being passed to data_unref().
  *
  * @return the number of waiting frames on success, negative errno on error.
@@ -232,17 +316,18 @@ RTMP_API int rtmp_client_send_video_avcc(struct rtmp_client *client,
 					 size_t len,
 					 void *frame_userdata);
 
+
 /**
  * Sends a video frame to the server.
  *
- * This function must be called on an RTMP_CONNECTED client.
+ * This function must be called on an RTMP_CLIENT_CONN_STATE_CONNECTED client.
  *
- * @param client : the connected rtmp_client which will send the data.
- * @param buf : pointer to a video frame.
- * @param len : length of the video buffer.
- * @param timestamp : timestamp of the frame, in milliseconds, from the rtmp
+ * @param client: the connected rtmp_client which will send the data.
+ * @param buf: pointer to a video frame.
+ * @param len: length of the video buffer.
+ * @param timestamp: timestamp of the frame, in milliseconds, from the rtmp
  * connection.
- * @param frame_userdata : userdata passed back to the data_unref() callback.
+ * @param frame_userdata: userdata passed back to the data_unref() callback.
  * buf must NOT be changed before being passed to data_unref().
  *
  * @return the number of waiting frames on success, negative errno on error.
@@ -253,16 +338,17 @@ RTMP_API int rtmp_client_send_video_frame(struct rtmp_client *client,
 					  uint32_t timestamp,
 					  void *frame_userdata);
 
+
 /**
  * Sends an AudioSpecifiConfig buffer to the server.
  * (See ISO/IEC 14496-3 1.6.2)
  *
- * This function must be called on an RTMP_CONNECTED client.
+ * This function must be called on an RTMP_CLIENT_CONN_STATE_CONNECTED client.
  *
- * @param client : the connected rtmp_client which will send the data.
- * @param buf : pointer to an AudioSpecificConfig buffer.
- * @param len : length of the AudioSpecificConfig buffer.
- * @param frame_userdata : userdata passed back to the data_unref() callback.
+ * @param client: the connected rtmp_client which will send the data.
+ * @param buf: pointer to an AudioSpecificConfig buffer.
+ * @param len: length of the AudioSpecificConfig buffer.
+ * @param frame_userdata: userdata passed back to the data_unref() callback.
  * buf must NOT be changed before being passed to data_unref().
  *
  * @return the number of waiting metadata/audio frames on success, negative
@@ -273,17 +359,18 @@ RTMP_API int rtmp_client_send_audio_specific_config(struct rtmp_client *client,
 						    size_t len,
 						    void *frame_userdata);
 
+
 /**
  * Sends an audio chunk to the server.
  *
- * This function must be called on an RTMP_CONNECTED client.
+ * This function must be called on an RTMP_CLIENT_CONN_STATE_CONNECTED client.
  *
- * @param client : the connected rtmp_client which will send the data.
- * @param buf : pointer to an audio chunk.
- * @param len : length of the audio buffer.
- * @param timestamp : timestamp of the audio chunk, in milliseconds, from the
+ * @param client: the connected rtmp_client which will send the data.
+ * @param buf: pointer to an audio chunk.
+ * @param len: length of the audio buffer.
+ * @param timestamp: timestamp of the audio chunk, in milliseconds, from the
  * rtmp connection.
- * @param frame_userdata : userdata passed back to the data_unref() callback.
+ * @param frame_userdata: userdata passed back to the data_unref() callback.
  * buf must NOT be changed before being passed to data_unref().
  *
  * @return the number of waiting metadata/audio frames on success, negative

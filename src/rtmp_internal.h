@@ -28,6 +28,12 @@
 
 #include <inttypes.h>
 #include <stddef.h>
+#include <transport-socket/tskt_resolv.h>
+
+#define WATCHDOG_TIMER_DURATION_MS 5000
+
+#define DEFAULT_RTMP_PORT 1935
+
 
 /** To be used for all public API */
 #ifdef RTMP_API_EXPORTS
@@ -41,7 +47,10 @@
 #endif /* !RTP_API_EXPORTS */
 
 
-#define DEFAULT_RTMP_PORT 1935
+/* codecheck_ignore[COMPLEX_MACRO] */
+#define RTMP_ENUM_CASE(_prefix, _name)                                         \
+case _prefix##_name:                                                           \
+	return #_name
 
 
 struct rtmp_buffer {

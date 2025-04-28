@@ -23,8 +23,10 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#include "rtmp_chunk_stream.h"
+#include <rtmp.h>
+
 #include "amf.h"
+#include "rtmp_chunk_stream.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -33,6 +35,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include <aac/aac.h>
+#include <audio-defs/adefs.h>
 #include <futils/list.h>
 #include <libpomp.h>
 
@@ -43,6 +47,7 @@ ULOG_DECLARE_TAG(rtmp_chunk_stream);
 #define RTMP_CHUNK_STREAM_MSG_LEN 512
 #define RTMP_CHUNK_HEADER_MAX_LEN 18
 
+
 enum bw_type {
 	BW_TYPE_HARD = 0,
 	BW_TYPE_SOFT,
@@ -50,7 +55,6 @@ enum bw_type {
 	BW_TYPE_UNKNOWN,
 };
 
-#define RTMP_MAX_QUEUE 10
 
 struct tx_buffer {
 	struct rtmp_buffer data_header;
@@ -65,6 +69,7 @@ struct tx_buffer {
 	uint32_t next_chunk_size;
 };
 
+
 struct rtmp_chunk_tx_chan {
 	int csid;
 	struct list_node node;
@@ -76,14 +81,14 @@ struct rtmp_chunk_tx_chan {
 	uint32_t prev_timestamp;
 
 	int first;
-	int need_abort;
 
-	struct tx_buffer queue[RTMP_MAX_QUEUE];
+	struct tx_buffer queue[RTMP_MAX_QUEUE_SIZE];
 	int queue_idx;
 	int queue_len;
 	size_t chunk_partial_len;
 	struct rtmp_buffer header;
 };
+
 
 struct rtmp_chunk_rx_chan {
 	int csid;
@@ -98,10 +103,12 @@ struct rtmp_chunk_rx_chan {
 	struct rtmp_buffer msg;
 };
 
+
 struct rtmp_chunk_stream {
 	/* From constructor */
 	struct pomp_loop *loop;
-	int sockfd;
+	struct pomp_timer *watchdog_timer;
+	struct tskt_socket *tsock;
 	struct rtmp_chunk_cbs cbs;
 	void *userdata;
 
@@ -113,6 +120,7 @@ struct rtmp_chunk_stream {
 	uint32_t tx_chunk_size;
 
 	int tx_chan_in_progess;
+	int prev_csid;
 
 	uint32_t window_ack_size;
 	uint32_t total_bytes;
@@ -125,7 +133,32 @@ struct rtmp_chunk_stream {
 	struct rtmp_buffer rcvbuf;
 
 	int pomp_watch_write;
+
+	/* audio */
+	bool audio_setup;
+	uint8_t audio_setting;
+
+	/* message stream id
+	 * (See 5.3.1.2.5. Common Header Fields in Adobe’s Real Time Messaging
+	 *  Protocol) */
+	uint32_t published_msid;
 };
+
+
+static int send_data(struct rtmp_chunk_stream *stream,
+		     int csid,
+		     uint8_t mtid,
+		     uint32_t msid,
+		     uint32_t timestamp,
+		     struct rtmp_buffer *data_header,
+		     struct rtmp_buffer *data,
+		     void *frame_userdata,
+		     int internal,
+		     int32_t next_chunk_size);
+
+
+static int send_ack(struct rtmp_chunk_stream *stream);
+
 
 static int clone_buffer(struct rtmp_buffer *src, struct rtmp_buffer *dst)
 {
@@ -142,6 +175,7 @@ static int clone_buffer(struct rtmp_buffer *src, struct rtmp_buffer *dst)
 	return 0;
 }
 
+
 static int clone_data(void *src, size_t len, struct rtmp_buffer *dst)
 {
 	if (!src || !dst)
@@ -156,6 +190,7 @@ static int clone_data(void *src, size_t len, struct rtmp_buffer *dst)
 	memcpy(dst->buf, src, dst->len);
 	return 0;
 }
+
 
 static struct rtmp_chunk_tx_chan *new_chunk_tx_chan(int csid)
 {
@@ -184,8 +219,9 @@ static struct rtmp_chunk_tx_chan *new_chunk_tx_chan(int csid)
 	return chan;
 }
 
-static void delete_chunk_tx_chan(struct rtmp_chunk_stream *stream,
-				 struct rtmp_chunk_tx_chan *chan)
+
+static void flush_chunk_tx_chan(struct rtmp_chunk_stream *stream,
+				struct rtmp_chunk_tx_chan *chan)
 {
 	int i;
 	if (!chan)
@@ -193,20 +229,40 @@ static void delete_chunk_tx_chan(struct rtmp_chunk_stream *stream,
 
 	/* Unref all waiting buffers */
 	for (i = 0; i < chan->queue_len; i++) {
-		int idx = chan->queue_idx + i % RTMP_MAX_QUEUE;
+		int idx = (chan->queue_idx + i) % RTMP_MAX_QUEUE_SIZE;
 		if (chan->queue[idx].internal)
 			free(chan->queue[idx].data.buf);
 		else
 			stream->cbs.data_sent(chan->queue[idx].data.buf,
 					      chan->queue[idx].frame_userdata,
 					      stream->userdata);
-		if (chan->queue[idx].data_header.cap)
+		chan->queue[idx].data.buf = NULL;
+		chan->queue[idx].frame_userdata = NULL;
+		if (chan->queue[idx].data_header.cap) {
 			free(chan->queue[idx].data_header.buf);
+			chan->queue[idx].data_header.buf = NULL;
+		}
 	}
+	chan->queue_idx = 0;
+	chan->queue_len = 0;
+	if (chan->csid == stream->tx_chan_in_progess)
+		stream->tx_chan_in_progess = 0;
+}
+
+
+static void delete_chunk_tx_chan(struct rtmp_chunk_stream *stream,
+				 struct rtmp_chunk_tx_chan *chan)
+{
+	if (!chan)
+		return;
+
+	/* Unref all waiting buffers */
+	flush_chunk_tx_chan(stream, chan);
 
 	free(chan->header.buf);
 	free(chan);
 }
+
 
 static struct rtmp_chunk_rx_chan *new_chunk_rx_chan(int csid)
 {
@@ -232,6 +288,7 @@ static struct rtmp_chunk_rx_chan *new_chunk_rx_chan(int csid)
 	return chan;
 }
 
+
 static void delete_chunk_rx_chan(struct rtmp_chunk_rx_chan *chan)
 {
 	if (!chan)
@@ -240,6 +297,7 @@ static void delete_chunk_rx_chan(struct rtmp_chunk_rx_chan *chan)
 	free(chan->msg.buf);
 	free(chan);
 }
+
 
 static int update_pomp_event(struct rtmp_chunk_stream *stream)
 {
@@ -259,28 +317,28 @@ static int update_pomp_event(struct rtmp_chunk_stream *stream)
 
 	stream->pomp_watch_write = need_out;
 
-	if (need_out)
-		return pomp_loop_update2(
-			stream->loop, stream->sockfd, POMP_FD_EVENT_OUT, 0);
-	else
-		return pomp_loop_update2(
-			stream->loop, stream->sockfd, 0, POMP_FD_EVENT_OUT);
+	return tskt_socket_update_events(stream->tsock,
+					 need_out ? POMP_FD_EVENT_OUT : 0,
+					 need_out ? 0 : POMP_FD_EVENT_OUT);
 }
 
-static void notify_disconnection(struct rtmp_chunk_stream *stream)
+
+static void notify_disconnection(struct rtmp_chunk_stream *stream,
+				 enum rtmp_client_disconnection_reason reason)
 {
-	int ret;
 	/* First remove FD_EVENT_OUT from the pomp loop */
-	ret = pomp_loop_update2(
-		stream->loop, stream->sockfd, 0, POMP_FD_EVENT_OUT);
+	(void)tskt_socket_update_events(stream->tsock, 0, POMP_FD_EVENT_OUT);
+
 	stream->pomp_watch_write = 0;
 	/* Then, call the disconnect callback */
-	stream->cbs.disconnected(stream->userdata);
+	stream->cbs.disconnected(stream->userdata, reason);
 }
+
 
 static int fill_header_buffer(struct rtmp_chunk_tx_chan *chan,
 			      uint8_t mtid,
 			      uint32_t msid,
+			      int *prev_csid,
 			      size_t len,
 			      uint32_t timestamp,
 			      struct rtmp_buffer *header)
@@ -293,14 +351,14 @@ static int fill_header_buffer(struct rtmp_chunk_tx_chan *chan,
 	uint8_t *b;
 	uint32_t embedded_ts;
 
-	if (!chan || !header)
+	if (!chan || !header || !prev_csid)
 		return -EINVAL;
 
 	if (header->cap < RTMP_CHUNK_HEADER_MAX_LEN || header->len > 0)
 		return -EINVAL;
 
 	timestamp_delta = timestamp - chan->prev_timestamp;
-	if (timestamp_delta < 0 || chan->first) {
+	if (timestamp_delta < 0 || chan->first || (chan->prev_mtid != mtid)) {
 		/* Full header forced if we are going backward */
 		header_type = 0;
 	} else if ((chan->prev_mtid == mtid) && (chan->prev_msid == msid) &&
@@ -309,10 +367,10 @@ static int fill_header_buffer(struct rtmp_chunk_tx_chan *chan,
 		/* No Header */
 		header_type = 3;
 	} else if ((chan->prev_mtid == mtid) && (chan->prev_msid == msid) &&
-		   (chan->prev_len == len)) {
+		   (chan->prev_len == len) && (timestamp == 0)) {
 		/* Timestamp delta only */
 		header_type = 2;
-	} else if (chan->prev_msid == msid) {
+	} else if ((chan->prev_msid == msid) && (timestamp == 0)) {
 		/* Everything but message stream id */
 		header_type = 1;
 	} else {
@@ -404,9 +462,11 @@ static int fill_header_buffer(struct rtmp_chunk_tx_chan *chan,
 	chan->prev_timestamp = timestamp;
 	chan->prev_delta = (uint32_t)timestamp_delta;
 	chan->first = 0;
+	*prev_csid = chan->csid;
 
 	return 0;
 }
+
 
 static struct rtmp_chunk_tx_chan *
 get_tx_channel(struct rtmp_chunk_stream *stream, int csid)
@@ -433,6 +493,7 @@ get_tx_channel(struct rtmp_chunk_stream *stream, int csid)
 	return chan;
 }
 
+
 static struct rtmp_chunk_rx_chan *
 get_rx_channel(struct rtmp_chunk_stream *stream, int csid)
 {
@@ -458,7 +519,6 @@ get_rx_channel(struct rtmp_chunk_stream *stream, int csid)
 	return chan;
 }
 
-static int send_ack(struct rtmp_chunk_stream *stream);
 
 static int send_ack_if_needed(struct rtmp_chunk_stream *stream)
 {
@@ -476,6 +536,7 @@ static int send_ack_if_needed(struct rtmp_chunk_stream *stream)
 
 	return ret;
 }
+
 
 static int set_rx_chunk_size(struct rtmp_chunk_stream *stream,
 			     uint32_t chunk_size)
@@ -497,9 +558,10 @@ static int set_rx_chunk_size(struct rtmp_chunk_stream *stream,
 
 	stream->rx_chunk_size = chunk_size;
 
-	ULOGI("Rx chunk size set to %" PRIu32 " bytes", stream->rx_chunk_size);
+	ULOGI("rx chunk size set to %" PRIu32 " bytes", stream->rx_chunk_size);
 	return 0;
 }
+
 
 static int set_window_ack_size(struct rtmp_chunk_stream *stream,
 			       uint32_t window_ack_size)
@@ -509,11 +571,12 @@ static int set_window_ack_size(struct rtmp_chunk_stream *stream,
 
 	stream->window_ack_size = window_ack_size;
 
-	ULOGI("Window ack size set to %" PRIu32 " bytes",
+	ULOGI("window ack size set to %" PRIu32 " bytes",
 	      stream->window_ack_size);
 
 	return send_ack_if_needed(stream);
 }
+
 
 static int data_complete(struct rtmp_chunk_stream *stream,
 			 struct rtmp_chunk_rx_chan *chan)
@@ -523,9 +586,14 @@ static int data_complete(struct rtmp_chunk_stream *stream,
 	uint32_t chunk_size;
 	uint32_t abort_csid;
 	uint32_t window_size;
+	uint32_t rcv_bytes_since_last_ack;
 	uint32_t bw;
+	uint8_t type;
+	uint32_t stream_id;
+	uint32_t buff_len;
 	enum bw_type bw_type;
 	struct rtmp_chunk_rx_chan *abort_chan;
+	struct rtmp_buffer buf;
 
 	if (!stream || !chan)
 		return -EINVAL;
@@ -533,7 +601,7 @@ static int data_complete(struct rtmp_chunk_stream *stream,
 	switch (chan->mtid) {
 	case 0x01: /* Set Chunk size */
 		if (chan->msg.len != sizeof(data_ne)) {
-			ULOGW("Bad SetChunkSize size (%zu instead of %zu)",
+			ULOGW("bad SetChunkSize size (%zu instead of %zu)",
 			      chan->msg.len,
 			      sizeof(data_ne));
 			ret = -EBADMSG;
@@ -548,7 +616,7 @@ static int data_complete(struct rtmp_chunk_stream *stream,
 
 	case 0x02: /* Abort message */
 		if (chan->msg.len != sizeof(data_ne)) {
-			ULOGW("Bad Abort size (%zu instead of %zu)",
+			ULOGW("bad Abort size (%zu instead of %zu)",
 			      chan->msg.len,
 			      sizeof(data_ne));
 			ret = -EBADMSG;
@@ -564,21 +632,94 @@ static int data_complete(struct rtmp_chunk_stream *stream,
 			if (abort_chan->msg.len == 0)
 				continue;
 			if (abort_chan == chan) {
-				ULOGE("Abort on current chunk stream !");
+				ULOGE("abort on current chunk stream !");
 				continue;
 			}
-			ULOGI("Abort on chunk stream %d", abort_chan->csid);
+			ULOGI("abort on chunk stream %d", abort_chan->csid);
 			chan->msg.len = 0;
 		}
 		break;
 
 	case 0x03: /* Ack */
-		/* TODO */
+		memcpy(&data_ne, chan->msg.buf, sizeof(data_ne));
+		rcv_bytes_since_last_ack = ntohl(data_ne);
+		ULOGD("ack: %u (server), %u (client)",
+		      rcv_bytes_since_last_ack,
+		      stream->rcv_bytes_since_last_ack);
+		break;
+
+	case 0x04: /* User control message */
+		if (chan->msg.len != sizeof(data_ne) + 2) {
+			ULOGW("bad user control size: (%zu instead of %zu)",
+			      chan->msg.len,
+			      sizeof(data_ne) + 2);
+			ret = -EBADMSG;
+			break;
+		}
+
+		/* See 7.1.7.User Control Message Events in rtmp specification
+		 */
+		memcpy(&data_ne, chan->msg.buf + 2, sizeof(data_ne));
+		type = ntohs(chan->msg.buf[0]);
+		stream_id = ntohl(data_ne);
+
+		switch (type) {
+		case 0:
+			ULOGI("stream Begin (ID: %u)", stream_id);
+			break;
+		case 1:
+			ULOGI("stream EOF (ID: %u)", stream_id);
+			break;
+		case 2:
+			ULOGI("stream Dry (ID: %u)", stream_id);
+			break;
+		case 3:
+			memcpy(&data_ne, chan->msg.buf + 4, sizeof(data_ne));
+			buff_len = ntohs(data_ne);
+			ULOGI("setBuffer Length: %ums (ID: %u)",
+			      buff_len,
+			      stream_id);
+			break;
+		case 4:
+			ULOGI("streamIs Recorded (ID: %u)", stream_id);
+			break;
+		case 6:
+			ULOGI("pingRequest (ID: %u)", stream_id);
+			buf.cap = 6;
+			buf.buf = calloc(buf.cap, 1);
+			if (!buf.buf)
+				return -ENOMEM;
+			buf.rd = 0;
+			buf.len = buf.cap;
+
+			buf.buf[0] = 0x07;
+			data_ne = htonl(stream_id);
+			memcpy(&buf.buf[1], &data_ne, sizeof(data_ne));
+
+			ret = send_data(stream,
+					2,
+					0x04,
+					stream->published_msid,
+					0,
+					NULL,
+					&buf,
+					NULL,
+					1,
+					0);
+			if (ret < 0)
+				free(buf.buf);
+			break;
+		default:
+			ULOGW("unknown user control message %u (ID: %u)",
+			      type,
+			      stream_id);
+			break;
+		};
 		break;
 
 	case 0x05: /* Window ack size */
 		if (chan->msg.len != sizeof(data_ne)) {
-			ULOGW("Bad WindowAckSize size (%zu instead of %zu)",
+			ULOGW("bad WindowAckSize size (%zu instead of %zu)",
 			      chan->msg.len,
 			      sizeof(data_ne));
 			ret = -EBADMSG;
@@ -592,7 +733,7 @@ static int data_complete(struct rtmp_chunk_stream *stream,
 
 	case 0x06: /* Peer bandwidth */
 		if (chan->msg.len != sizeof(data_ne) + 1) {
-			ULOGW("Bad WindowAckSize size (%zu instead of %zu)",
+			ULOGW("bad WindowAckSize size (%zu instead of %zu)",
 			      chan->msg.len,
 			      sizeof(data_ne) + 1);
 			ret = -EBADMSG;
@@ -638,12 +779,13 @@ static int data_complete(struct rtmp_chunk_stream *stream,
 		break;
 
 	default:
-		ULOGW("Unknown mtid : %u", chan->mtid);
+		ULOGW("unknown mtid: %u", chan->mtid);
 		break;
 	}
 
 	return ret;
 }
+
 
 /* Check whether _x bytes of data (or more) are available in _d. If that's not
  * the case, return 0 bytes consumed */
@@ -652,6 +794,7 @@ static int data_complete(struct rtmp_chunk_stream *stream,
 		if ((_d->rd + _x) > _d->len)                                   \
 			return 0;                                              \
 	} while (0)
+
 
 static ssize_t stream_consume_rcv_data(struct rtmp_chunk_stream *stream,
 				       struct rtmp_buffer *data)
@@ -764,7 +907,7 @@ static ssize_t stream_consume_rcv_data(struct rtmp_chunk_stream *stream,
 	if (((chan->len != msg_len) || (chan->msid != msid) ||
 	     (chan->mtid != mtid) || (!ts_ok)) &&
 	    chan->msg.len > 0) {
-		ULOGW("Unexpected new message for channel %d", csid);
+		ULOGW("unexpected new message for channel %d", csid);
 		chan->msg.len = 0;
 	}
 
@@ -814,6 +957,7 @@ static ssize_t stream_consume_rcv_data(struct rtmp_chunk_stream *stream,
 	return total_len;
 }
 
+
 static void event_data_in(struct rtmp_chunk_stream *stream)
 {
 	size_t avail;
@@ -828,20 +972,27 @@ static void event_data_in(struct rtmp_chunk_stream *stream)
 	avail = stream->rcvbuf.cap - stream->rcvbuf.len;
 
 	if (avail == 0) {
-		ULOGE("Buffer full ... this is bad");
+		ULOGE("buffer full ... this is bad");
 		exit(1);
 		return;
 	}
 
-	slen = recv(stream->sockfd,
-		    &stream->rcvbuf.buf[stream->rcvbuf.len],
-		    avail,
-		    0);
+	slen = tskt_socket_read(stream->tsock,
+				&stream->rcvbuf.buf[stream->rcvbuf.len],
+				avail,
+				NULL);
+
 	if (slen < 0) {
 		int err = -errno;
-		ULOG_ERRNO("recv", -err);
+
+		if (errno == EAGAIN)
+			return;
+
+		ULOG_ERRNO("tskt_socket_read", errno);
 		if (err == -ECONNRESET)
-			notify_disconnection(stream);
+			notify_disconnection(
+				stream,
+				RTMP_CLIENT_DISCONNECTION_REASON_NETWORK_ERROR);
 		return;
 	}
 	stream->rcvbuf.len += slen;
@@ -876,6 +1027,7 @@ static void event_data_in(struct rtmp_chunk_stream *stream)
 	/* rd is always reset to 0 */
 	stream->rcvbuf.rd = 0;
 }
+
 
 static int send_chunk(struct rtmp_chunk_stream *stream,
 		      struct rtmp_buffer *header,
@@ -961,9 +1113,7 @@ data:
 #else
 	flags = 0;
 #endif
-	do {
-		sret = sendmsg(stream->sockfd, &msg, flags);
-	} while (sret < 0 && errno == EINTR);
+	sret = tskt_socket_writev(stream->tsock, iov, iov_num);
 	if (sret < 0) {
 		return -errno;
 	} else if ((size_t)sret < send_len) {
@@ -977,6 +1127,7 @@ data:
 
 	return 0;
 }
+
 
 static int process_channel_send(struct rtmp_chunk_stream *stream,
 				struct rtmp_chunk_tx_chan *chan)
@@ -1034,6 +1185,7 @@ static int process_channel_send(struct rtmp_chunk_stream *stream,
 		ret = fill_header_buffer(chan,
 					 buffer->mtid,
 					 buffer->msid,
+					 &stream->prev_csid,
 					 full_len,
 					 buffer->timestamp,
 					 &chan->header);
@@ -1048,7 +1200,8 @@ static int process_channel_send(struct rtmp_chunk_stream *stream,
 				 0);
 
 		if (ret < 0) {
-			ULOG_ERRNO("send_chunk", -ret);
+			if (ret != -EAGAIN)
+				ULOG_ERRNO("send_chunk", -ret);
 			goto error;
 		} else if (ret > 0) {
 			chan->chunk_partial_len = ret;
@@ -1062,6 +1215,7 @@ static int process_channel_send(struct rtmp_chunk_stream *stream,
 		ret = fill_header_buffer(chan,
 					 buffer->mtid,
 					 buffer->msid,
+					 &stream->prev_csid,
 					 full_len,
 					 buffer->timestamp,
 					 &chan->header);
@@ -1076,7 +1230,8 @@ static int process_channel_send(struct rtmp_chunk_stream *stream,
 				 0);
 
 		if (ret < 0) {
-			ULOG_ERRNO("send_chunk", -ret);
+			if (ret != -EAGAIN)
+				ULOG_ERRNO("send_chunk", -ret);
 			goto error;
 		} else if (ret > 0) {
 			chan->chunk_partial_len = ret;
@@ -1086,26 +1241,39 @@ static int process_channel_send(struct rtmp_chunk_stream *stream,
 
 send_done:
 
-	if (buffer->next_chunk_size > 0)
+	if (buffer->next_chunk_size > 0) {
 		stream->tx_chunk_size = buffer->next_chunk_size;
+		ULOGI("tx chunk size set to %" PRIu32 " bytes",
+		      stream->tx_chunk_size);
+	}
 	if (!buffer->internal)
 		stream->cbs.data_sent(buffer->data.buf,
 				      buffer->frame_userdata,
 				      stream->userdata);
 	else
 		free(buffer->data.buf);
-	if (buffer->data_header.cap)
+	buffer->data.buf = NULL;
+	buffer->data.cap = 0;
+	buffer->data.len = 0;
+	buffer->frame_userdata = NULL;
+	if (buffer->data_header.cap) {
 		free(buffer->data_header.buf);
+		buffer->data_header.buf = NULL;
+		buffer->data_header.cap = 0;
+		buffer->data_header.len = 0;
+	}
 	chan->queue_idx++;
-	if (chan->queue_idx >= RTMP_MAX_QUEUE)
+	if (chan->queue_idx >= RTMP_MAX_QUEUE_SIZE)
 		chan->queue_idx = 0;
 	chan->queue_len--;
 	chan->prev_timestamp = buffer->timestamp;
+
 	return 0;
 
 error:
 	return ret;
 }
+
 
 static void event_data_out(struct rtmp_chunk_stream *stream)
 {
@@ -1121,13 +1289,15 @@ static void event_data_out(struct rtmp_chunk_stream *stream)
 		int found = 0;
 		list_walk_entry_forward(&stream->tx_channels, chan, node)
 		{
+			if (chan->queue_len == 0)
+				continue;
 			if (chan->csid != stream->tx_chan_in_progess)
 				continue;
 			found = 1;
 			break;
 		}
 		if (!found) {
-			ULOGE("Got a partial chunk sent on an "
+			ULOGE("got a partial chunk sent on an "
 			      "unknown channel (%d)",
 			      stream->tx_chan_in_progess);
 			goto loop;
@@ -1138,7 +1308,10 @@ static void event_data_out(struct rtmp_chunk_stream *stream)
 			/* TODO Check ! */
 			if (ret != -EAGAIN) {
 				ULOG_ERRNO("process_channel_send", -ret);
-				notify_disconnection(stream);
+				notify_disconnection(
+					stream,
+					/* codecheck_ignore[LONG_LINE] */
+					RTMP_CLIENT_DISCONNECTION_REASON_NETWORK_ERROR);
 				return;
 			}
 			return;
@@ -1157,7 +1330,10 @@ loop:
 			/* TODO Check ! */
 			if (ret != -EAGAIN) {
 				ULOG_ERRNO("process_channel_send", -ret);
-				notify_disconnection(stream);
+				notify_disconnection(
+					stream,
+					/* codecheck_ignore[LONG_LINE] */
+					RTMP_CLIENT_DISCONNECTION_REASON_NETWORK_ERROR);
 				return;
 			} else {
 				stream->tx_chan_in_progess = chan->csid;
@@ -1169,26 +1345,47 @@ loop:
 	update_pomp_event(stream);
 }
 
-static void pomp_event_cb(int fd, uint32_t revents, void *userdata)
+
+static void
+tskt_event_cb(struct tskt_socket *sock, uint32_t revents, void *userdata)
 {
+	int err;
 	struct rtmp_chunk_stream *stream = userdata;
 
 	if (revents & POMP_FD_EVENT_IN)
 		event_data_in(stream);
 	if (revents & POMP_FD_EVENT_OUT)
 		event_data_out(stream);
+
+	/* Rearm watchdog */
+	err = pomp_timer_set(stream->watchdog_timer,
+			     WATCHDOG_TIMER_DURATION_MS);
+	if (err < 0)
+		ULOG_ERRNO("pomp_timer_set", -err);
+}
+
+
+static void watchdog_timer_cb(struct pomp_timer *timer, void *userdata)
+{
+	struct rtmp_chunk_stream *stream = userdata;
+
+	ULOGW("%s: no event received on socket for %.2fs, disconnecting",
+	      __func__,
+	      (float)WATCHDOG_TIMER_DURATION_MS / 1000.);
+
+	notify_disconnection(stream, RTMP_CLIENT_DISCONNECTION_REASON_TIMEOUT);
 }
 
 
 struct rtmp_chunk_stream *new_chunk_stream(struct pomp_loop *loop,
-					   int sockfd,
+					   struct tskt_socket *tsock,
 					   const struct rtmp_chunk_cbs *cbs,
 					   void *userdata)
 {
 	int ret;
 	struct rtmp_chunk_stream *stream = NULL;
 
-	if (!loop || sockfd < 0 || !cbs) {
+	if (!loop || !cbs || (tsock == NULL)) {
 		ret = -EINVAL;
 		goto error;
 	}
@@ -1206,9 +1403,17 @@ struct rtmp_chunk_stream *new_chunk_stream(struct pomp_loop *loop,
 	}
 
 	stream->loop = loop;
-	stream->sockfd = sockfd;
+	stream->tsock = tsock;
 	stream->cbs = *cbs;
 	stream->userdata = userdata;
+
+	stream->watchdog_timer =
+		pomp_timer_new(stream->loop, watchdog_timer_cb, stream);
+	if (stream->watchdog_timer == NULL) {
+		ret = -ENOMEM;
+		ULOG_ERRNO("pomp_timer_new", -ret);
+		goto error;
+	}
 
 	list_init(&stream->rx_channels);
 	list_init(&stream->tx_channels);
@@ -1223,8 +1428,8 @@ struct rtmp_chunk_stream *new_chunk_stream(struct pomp_loop *loop,
 	}
 	stream->rcvbuf.cap = stream->rx_chunk_size + RTMP_CHUNK_HEADER_MAX_LEN;
 
-	ret = pomp_loop_add(
-		loop, sockfd, POMP_FD_EVENT_IN, pomp_event_cb, stream);
+	ret = tskt_socket_set_event_cb(
+		tsock, POMP_FD_EVENT_IN, tskt_event_cb, stream);
 	if (ret < 0)
 		goto error;
 
@@ -1235,6 +1440,7 @@ error:
 	delete_chunk_stream(stream);
 	return NULL;
 }
+
 
 static int send_data(struct rtmp_chunk_stream *stream,
 		     int csid,
@@ -1257,11 +1463,12 @@ static int send_data(struct rtmp_chunk_stream *stream,
 
 	chan = get_tx_channel(stream, csid);
 
-	if (chan->queue_len >= RTMP_MAX_QUEUE)
+	if (chan->queue_len >= RTMP_MAX_QUEUE_SIZE)
 		return -EAGAIN;
 
 	/* Queue data */
-	idx = (chan->queue_idx + chan->queue_len) % RTMP_MAX_QUEUE;
+	idx = (chan->queue_idx + chan->queue_len) % RTMP_MAX_QUEUE_SIZE;
+
 	buffer = &chan->queue[idx];
 	if (data_header)
 		buffer->data_header = *data_header;
@@ -1285,6 +1492,7 @@ static int send_data(struct rtmp_chunk_stream *stream,
 	return chan->queue_len - 1;
 }
 
+
 int set_chunk_size(struct rtmp_chunk_stream *stream, uint32_t chunk_size)
 {
 	uint32_t chunk_size_ne = htonl(chunk_size);
@@ -1301,9 +1509,22 @@ int set_chunk_size(struct rtmp_chunk_stream *stream, uint32_t chunk_size)
 	if (ret != 0)
 		return ret;
 
-	return send_data(
-		stream, 2, 0x01, 0, 0, NULL, &buf, NULL, 1, chunk_size);
+	ret = send_data(stream,
+			2,
+			0x01,
+			stream->published_msid,
+			0,
+			NULL,
+			&buf,
+			NULL,
+			1,
+			chunk_size);
+	if (ret < 0)
+		free(buf.buf);
+
+	return ret;
 }
+
 
 static int send_abort(struct rtmp_chunk_stream *stream, uint32_t csid)
 {
@@ -1315,8 +1536,22 @@ static int send_abort(struct rtmp_chunk_stream *stream, uint32_t csid)
 	if (ret != 0)
 		return ret;
 
-	return send_data(stream, 2, 0x02, 0, 0, NULL, &buf, NULL, 1, 0);
+	ret = send_data(stream,
+			2,
+			0x02,
+			stream->published_msid,
+			0,
+			NULL,
+			&buf,
+			NULL,
+			1,
+			0);
+	if (ret < 0)
+		free(buf.buf);
+
+	return ret;
 }
+
 
 static int send_ack(struct rtmp_chunk_stream *stream)
 {
@@ -1328,8 +1563,22 @@ static int send_ack(struct rtmp_chunk_stream *stream)
 	if (ret != 0)
 		return ret;
 
-	return send_data(stream, 2, 0x03, 0, 0, NULL, &buf, NULL, 1, 0);
+	ret = send_data(stream,
+			2,
+			0x03,
+			stream->published_msid,
+			0,
+			NULL,
+			&buf,
+			NULL,
+			1,
+			0);
+	if (ret < 0)
+		free(buf.buf);
+
+	return ret;
 }
+
 
 static int send_window_ack_size(struct rtmp_chunk_stream *stream,
 				uint32_t window)
@@ -1341,8 +1590,22 @@ static int send_window_ack_size(struct rtmp_chunk_stream *stream,
 	ret = clone_data(&win_ne, sizeof(win_ne), &buf);
 	if (ret != 0)
 		return ret;
-	return send_data(stream, 2, 0x05, 0, 0, NULL, &buf, NULL, 1, 0);
+	ret = send_data(stream,
+			2,
+			0x05,
+			stream->published_msid,
+			0,
+			NULL,
+			&buf,
+			NULL,
+			1,
+			0);
+	if (ret < 0)
+		free(buf.buf);
+
+	return ret;
 }
+
 
 int send_metadata(struct rtmp_chunk_stream *stream,
 		  struct rtmp_buffer *data,
@@ -1360,28 +1623,39 @@ int send_metadata(struct rtmp_chunk_stream *stream,
 	b.len = 0;
 	ret = amf_encode(&b, "%s", "@setDataFrame");
 	if (ret != 0)
-		return ret;
-	return send_data(stream,
-			 4,
-			 0x12,
-			 0,
-			 timestamp,
-			 &b,
-			 data,
-			 frame_userdata,
-			 internal,
-			 0);
+		goto failure;
+
+	ret = send_data(stream,
+			4,
+			0x12,
+			stream->published_msid,
+			timestamp,
+			&b,
+			data,
+			frame_userdata,
+			internal,
+			0);
+	if (ret < 0)
+		goto failure;
+	return ret;
+
+failure:
+	free(b.buf);
+
+	return ret;
 }
+
 
 int send_video_frame(struct rtmp_chunk_stream *stream,
 		     struct rtmp_buffer *frame,
-		     uint32_t stream_id,
 		     uint32_t timestamp,
 		     int is_meta,
 		     int is_key,
 		     void *frame_userdata)
 {
+	int ret;
 	struct rtmp_buffer b;
+
 	b.cap = 5;
 	b.buf = calloc(b.cap, 1);
 	if (!b.buf)
@@ -1392,26 +1666,96 @@ int send_video_frame(struct rtmp_chunk_stream *stream,
 	b.buf[0] = is_key ? 0x17 : 0x27;
 	b.buf[1] = is_meta ? 0x00 : 0x01;
 
-	return send_data(stream,
-			 6,
-			 0x09,
-			 stream_id,
-			 timestamp,
-			 &b,
-			 frame,
-			 frame_userdata,
-			 0,
-			 0);
+	ret = send_data(stream,
+			4,
+			0x09,
+			stream->published_msid,
+			timestamp,
+			&b,
+			frame,
+			frame_userdata,
+			0,
+			0);
+	if (ret < 0)
+		free(b.buf);
+
+	return ret;
 }
+
+
+static int aac_asc_to_rtmp_audio_config(struct rtmp_buffer *data,
+					uint8_t *audio_setting)
+{
+	int ret = 0;
+	struct aac_asc asc;
+	struct adef_format audio_format;
+
+	if ((audio_setting == NULL) || (data == NULL))
+		return -EINVAL;
+
+	ret = aac_parse_asc(data->buf, data->len, &asc);
+	if (ret < 0)
+		return ret;
+
+	ret = aac_asc_to_adef_format(&asc, &audio_format);
+	if (ret < 0)
+		return ret;
+
+	if (!adef_is_format_valid(&audio_format))
+		return -EINVAL;
+
+	if ((audio_format.encoding != ADEF_ENCODING_AAC_LC) ||
+	    ((audio_format.channel_count != 1) &&
+	     (audio_format.channel_count != 2)) ||
+	    (audio_format.bit_depth != 16))
+		return -EINVAL;
+
+	if ((audio_format.sample_rate != 48000) &&
+	    (audio_format.sample_rate != 44100) &&
+	    (audio_format.sample_rate != 22050) &&
+	    (audio_format.sample_rate != 11025))
+		return -EINVAL;
+
+	/* Format: HE-AAC */
+	*audio_setting = 0xa0;
+
+	/* Sample size: 16 bits */
+	*audio_setting |= 0x2;
+
+	switch (audio_format.sample_rate) {
+	case 48000:
+	case 44100:
+		*audio_setting |= 0xc;
+		break;
+
+	case 22050:
+		*audio_setting |= 0x8;
+		break;
+
+	case 11025:
+		*audio_setting |= 0x4;
+		break;
+
+	default:
+		break;
+	}
+
+	if (audio_format.channel_count == 2)
+		*audio_setting |= 0x1;
+
+	return 0;
+}
+
 
 int send_audio_data(struct rtmp_chunk_stream *stream,
 		    struct rtmp_buffer *data,
-		    uint32_t stream_id,
 		    uint32_t timestamp,
 		    int is_meta,
 		    void *frame_userdata)
 {
+	int ret = 0;
 	struct rtmp_buffer b;
+
 	b.cap = 2;
 	b.buf = calloc(b.cap, 1);
 	if (!b.buf)
@@ -1419,41 +1763,107 @@ int send_audio_data(struct rtmp_chunk_stream *stream,
 	b.rd = 0;
 	b.len = b.cap;
 
-	b.buf[0] = 0xaf;
+	/* the first packet to be sent should be the audio config */
+	if (!stream->audio_setup) {
+		ret = aac_asc_to_rtmp_audio_config(data,
+						   &stream->audio_setting);
+		if (ret < 0)
+			goto failure;
+		stream->audio_setup = true;
+	}
+
+
+	b.buf[0] = stream->audio_setting;
 	b.buf[1] = is_meta ? 0x00 : 0x01;
 
-	return send_data(stream,
-			 4,
-			 0x08,
-			 stream_id,
-			 timestamp,
-			 &b,
-			 data,
-			 frame_userdata,
-			 0,
-			 0);
+	ret = send_data(stream,
+			3,
+			0x08,
+			stream->published_msid,
+			timestamp,
+			&b,
+			data,
+			frame_userdata,
+			0,
+			0);
+	if (ret < 0)
+		goto failure;
+
+	return ret;
+
+failure:
+	free(b.buf);
+	return ret;
 }
+
 
 int send_amf_message(struct rtmp_chunk_stream *stream, struct rtmp_buffer *msg)
 {
 	int ret;
+	bool found = false;
+	uint8_t *p = NULL;
+	unsigned int i;
 	struct rtmp_buffer buf;
 	ret = clone_buffer(msg, &buf);
 	if (ret != 0)
 		return ret;
-	return send_data(stream, 3, 0x14, 0, 0, NULL, &buf, NULL, 1, 0);
+
+	for (i = 0, p = buf.buf; (buf.len - i) >= sizeof("publish") - 1;
+	     i++, p++) {
+		if ((*p == 'p') && !memcmp("publish", p, sizeof("publish") - 1))
+			found = true;
+	}
+
+	/* It seems mandatory to set csid to 0x4 on "publish" message to connect
+	 * to the wowza RTMP server*/
+	ret = send_data(stream,
+			found ? 4 : 3,
+			0x14,
+			stream->published_msid,
+			0,
+			NULL,
+			&buf,
+			NULL,
+			1,
+			0);
+	if (ret < 0)
+		free(buf.buf);
+
+	return ret;
 }
 
-int delete_chunk_stream(struct rtmp_chunk_stream *stream)
+
+int flush_chunk_stream(struct rtmp_chunk_stream *stream)
 {
-	int ret;
 	struct rtmp_chunk_tx_chan *tchan, *ttmp;
-	struct rtmp_chunk_rx_chan *rchan, *rtmp;
 
 	if (!stream)
 		return -EINVAL;
 
-	ret = pomp_loop_remove(stream->loop, stream->sockfd);
+	list_walk_entry_forward_safe(&stream->tx_channels, tchan, ttmp, node)
+	{
+		flush_chunk_tx_chan(stream, tchan);
+	}
+
+	return 0;
+}
+
+
+int delete_chunk_stream(struct rtmp_chunk_stream *stream)
+{
+	int ret, err;
+	struct rtmp_chunk_rx_chan *rchan, *rtmp;
+	struct rtmp_chunk_tx_chan *tchan, *ttmp;
+
+	if (!stream)
+		return -EINVAL;
+
+	ret = tskt_socket_update_events(
+		stream->tsock, 0, POMP_FD_EVENT_OUT | POMP_FD_EVENT_IN);
+	if (ret != 0)
+		return ret;
+
+	ret = tskt_socket_set_event_cb(stream->tsock, 0, NULL, NULL);
 	if (ret != 0)
 		return ret;
 
@@ -1462,13 +1872,32 @@ int delete_chunk_stream(struct rtmp_chunk_stream *stream)
 		list_del(&tchan->node);
 		delete_chunk_tx_chan(stream, tchan);
 	}
+
 	list_walk_entry_forward_safe(&stream->rx_channels, rchan, rtmp, node)
 	{
 		list_del(&rchan->node);
 		delete_chunk_rx_chan(rchan);
 	}
 
+	err = pomp_timer_clear(stream->watchdog_timer);
+	if (err < 0)
+		ULOG_ERRNO("pomp_timer_clear", -err);
+
+	err = pomp_timer_destroy(stream->watchdog_timer);
+	if (err < 0)
+		ULOG_ERRNO("pomp_timer_destroy", -err);
+
 	free(stream->rcvbuf.buf);
 	free(stream);
+	return 0;
+}
+
+
+int store_message_stream_id(struct rtmp_chunk_stream *stream, uint32_t msid)
+{
+	if (!stream)
+		return -EINVAL;
+
+	stream->published_msid = msid;
 	return 0;
 }

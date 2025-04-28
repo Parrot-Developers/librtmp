@@ -27,6 +27,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 
 #include <libpomp.h>
@@ -38,6 +39,7 @@ ULOG_DECLARE_TAG(flv_reader);
 #define TAG_BUFFER_SZ (128 * 1024)
 
 #define TAG_HEADER_LEN 11
+
 
 struct flv_reader {
 	FILE *f;
@@ -56,6 +58,7 @@ struct flv_reader {
 	uint32_t loop_ts;
 };
 
+
 static enum flv_data_type get_data_type(uint8_t raw)
 {
 	enum flv_data_type t = FLV_UNKNOWN;
@@ -73,6 +76,7 @@ static enum flv_data_type get_data_type(uint8_t raw)
 	return t;
 }
 
+
 static uint32_t get_tag_ts(uint8_t *tag)
 {
 	uint32_t ts;
@@ -84,6 +88,7 @@ static uint32_t get_tag_ts(uint8_t *tag)
 
 	return ts;
 }
+
 
 static size_t get_tag_len(uint8_t *tag)
 {
@@ -139,9 +144,9 @@ retry:
 	len = fread(r->tag_buffer, 1, TAG_HEADER_LEN, r->f);
 	if (len != TAG_HEADER_LEN) {
 		if (feof(r->f)) {
-			ULOGI("End of file");
+			ULOGI("end of file");
 			if (r->loop) {
-				ULOGI("Loop back to start");
+				ULOGI("loop back to start");
 				ret = fseeko(r->f, r->initial_offset, SEEK_SET);
 				if (ret < 0) {
 					ret = -errno;
@@ -157,7 +162,7 @@ retry:
 		}
 		return;
 	}
-	r->tb_len += len;
+	r->tb_len += TAG_HEADER_LEN;
 
 	tag_len = get_tag_len(r->tag_buffer);
 	tag_timestamp = get_tag_ts(r->tag_buffer) + r->loop_ts;
@@ -171,7 +176,14 @@ retry:
 	if (delta == 0)
 		delta = 1;
 
-	while (r->tb_len + tag_len > r->tb_cap) {
+	/* Avoid overflow */
+	ULOG_ERRNO_RETURN_IF(r->tb_len > (SIZE_MAX - tag_len), ERANGE);
+	ULOG_ERRNO_RETURN_IF(tag_len > (SIZE_MAX - r->tb_len), ERANGE);
+	const size_t capacity_needed = r->tb_len + tag_len;
+	while (r->tb_cap < capacity_needed) {
+		/* Avoid overflow */
+		ULOG_ERRNO_RETURN_IF(r->tb_cap > (SIZE_MAX - TAG_BUFFER_SZ),
+				     ERANGE);
 		size_t nl = r->tb_cap + TAG_BUFFER_SZ;
 		void *tmp = realloc(r->tag_buffer, nl);
 		if (!tmp) {
@@ -184,7 +196,7 @@ retry:
 
 	len = fread(&r->tag_buffer[TAG_HEADER_LEN], 1, tag_len, r->f);
 	if (len != tag_len) {
-		ULOGW("Read %zu bytes instead of %zu", len, tag_len);
+		ULOGW("read %zu bytes instead of %zu", len, tag_len);
 		return;
 	}
 	r->tb_len += len;
@@ -194,6 +206,7 @@ retry:
 	if (ret != 0)
 		ULOG_ERRNO("pomp_timer_set", -ret);
 }
+
 
 struct flv_reader *flv_open_file(const char *path,
 				 struct pomp_loop *loop,
@@ -265,6 +278,7 @@ error:
 	return NULL;
 }
 
+
 void flv_close_file(struct flv_reader *r)
 {
 	if (!r)
@@ -279,6 +293,7 @@ void flv_close_file(struct flv_reader *r)
 	free(r);
 }
 
+
 int flv_start_read(struct flv_reader *r, float speed, int loop)
 {
 	if (!r)
@@ -289,6 +304,7 @@ int flv_start_read(struct flv_reader *r, float speed, int loop)
 
 	return pomp_timer_set(r->timer, 1);
 }
+
 
 const char *flv_data_type_str(enum flv_data_type type)
 {

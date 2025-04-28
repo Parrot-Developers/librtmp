@@ -57,16 +57,25 @@ ULOG_DECLARE_TAG(amf);
 #define AMF0_OBJ_END_TAG 0x09
 #define AMF0_OBJ_END_LEN 3
 
+
 /* Internal API */
 
 static int amf_put_number(struct rtmp_buffer *buf, double value);
+
 static int amf_put_boolean(struct rtmp_buffer *buf, uint8_t value);
+
 static int amf_put_string(struct rtmp_buffer *buf, const char *string);
+
 static int amf_put_property(struct rtmp_buffer *buf, const char *key);
+
 static int amf_put_object_start(struct rtmp_buffer *buf);
+
 static int amf_put_ecma_start(struct rtmp_buffer *buf, uint32_t len);
+
 static int amf_put_null(struct rtmp_buffer *buf);
+
 static int amf_put_object_end(struct rtmp_buffer *buf);
+
 
 /* Encoder API */
 
@@ -132,7 +141,7 @@ int amf_encode(struct rtmp_buffer *buffer, const char *fmt, ...)
 					ret = amf_put_string(buffer, str);
 				break;
 			default:
-				ULOGW("Unexpected format char %c", d);
+				ULOGW("unexpected format char %c", d);
 				ret = -EINVAL;
 				break;
 			}
@@ -209,7 +218,7 @@ int amf_encode(struct rtmp_buffer *buffer, const char *fmt, ...)
 			break;
 
 		default:
-			ULOGI("Got unexpected char %c", c);
+			ULOGI("got unexpected char %c", c);
 			ret = -EINVAL;
 			break;
 		}
@@ -222,6 +231,7 @@ int amf_encode(struct rtmp_buffer *buffer, const char *fmt, ...)
 
 	return ret;
 }
+
 
 /* Decoder API */
 
@@ -245,6 +255,7 @@ char *amf_get_msg_name(struct rtmp_buffer *buf, double *id)
 	return str;
 }
 
+
 /* Internal implementation */
 
 /* Endianness stuff ... */
@@ -260,6 +271,7 @@ char *amf_get_msg_name(struct rtmp_buffer *buf, double *id)
 				 : ((uint64_t)ntohl((x)&0xFFFFFFFF) << 32) |   \
 					   ntohl((x) >> 32))
 #endif
+
 
 static int amf_put_number(struct rtmp_buffer *buf, double value)
 {
@@ -285,6 +297,7 @@ static int amf_put_number(struct rtmp_buffer *buf, double value)
 	return 0;
 }
 
+
 static int amf_put_boolean(struct rtmp_buffer *buf, uint8_t value)
 {
 	if (!buf)
@@ -299,6 +312,7 @@ static int amf_put_boolean(struct rtmp_buffer *buf, uint8_t value)
 
 	return 0;
 }
+
 
 static int amf_put_string_internal(struct rtmp_buffer *buf,
 				   const char *string,
@@ -349,15 +363,18 @@ static int amf_put_string_internal(struct rtmp_buffer *buf,
 	return 0;
 }
 
+
 static int amf_put_string(struct rtmp_buffer *buf, const char *string)
 {
 	return amf_put_string_internal(buf, string, 1);
 }
 
+
 static int amf_put_property(struct rtmp_buffer *buf, const char *key)
 {
 	return amf_put_string_internal(buf, key, 0);
 }
+
 
 static int amf_put_object_start(struct rtmp_buffer *buf)
 {
@@ -372,6 +389,7 @@ static int amf_put_object_start(struct rtmp_buffer *buf)
 
 	return 0;
 }
+
 
 static int amf_put_ecma_start(struct rtmp_buffer *buf, uint32_t len)
 {
@@ -391,6 +409,7 @@ static int amf_put_ecma_start(struct rtmp_buffer *buf, uint32_t len)
 	return 0;
 }
 
+
 static int amf_put_null(struct rtmp_buffer *buf)
 {
 	if (!buf)
@@ -404,6 +423,7 @@ static int amf_put_null(struct rtmp_buffer *buf)
 
 	return 0;
 }
+
 
 static int amf_put_object_end(struct rtmp_buffer *buf)
 {
@@ -447,6 +467,7 @@ int amf_get_number(struct rtmp_buffer *buf, double *value)
 	return 0;
 }
 
+
 int amf_get_boolean(struct rtmp_buffer *buf, uint8_t *value)
 {
 	if (!buf || !value)
@@ -463,6 +484,7 @@ int amf_get_boolean(struct rtmp_buffer *buf, uint8_t *value)
 	return 0;
 }
 
+
 static ssize_t amf_get_stringp(struct rtmp_buffer *buf,
 			       char **stringp,
 			       size_t *len,
@@ -472,7 +494,7 @@ static ssize_t amf_get_stringp(struct rtmp_buffer *buf,
 	size_t size_offset;
 	size_t size_len;
 	ssize_t total_len;
-	/* Note : stringp is NOT null terminated ! */
+	/* Note: stringp is NOT null terminated ! */
 	if (!buf || !stringp || !len)
 		return -EINVAL;
 
@@ -514,6 +536,7 @@ static ssize_t amf_get_stringp(struct rtmp_buffer *buf,
 	return total_len;
 }
 
+
 int amf_get_string(struct rtmp_buffer *buf, char **string)
 {
 	ssize_t data_len;
@@ -535,6 +558,7 @@ int amf_get_string(struct rtmp_buffer *buf, char **string)
 
 	return 0;
 }
+
 
 int amf_get_property(struct rtmp_buffer *buf, char **key)
 {
@@ -558,6 +582,7 @@ int amf_get_property(struct rtmp_buffer *buf, char **key)
 	return 0;
 }
 
+
 int amf_get_object_start(struct rtmp_buffer *buf)
 {
 	if (!buf)
@@ -572,6 +597,7 @@ int amf_get_object_start(struct rtmp_buffer *buf)
 	buf->rd += AMF0_OBJ_START_LEN;
 	return 0;
 }
+
 
 int amf_get_null(struct rtmp_buffer *buf)
 {
@@ -588,6 +614,7 @@ int amf_get_null(struct rtmp_buffer *buf)
 	return 0;
 }
 
+
 int amf_get_object_end(struct rtmp_buffer *buf)
 {
 	uint8_t data[3] = {0, 0, AMF0_OBJ_END_TAG};
@@ -603,6 +630,7 @@ int amf_get_object_end(struct rtmp_buffer *buf)
 	buf->rd += AMF0_OBJ_END_LEN;
 	return 0;
 }
+
 
 int amf_skip_data(struct rtmp_buffer *buf)
 {
@@ -632,7 +660,7 @@ int amf_skip_data(struct rtmp_buffer *buf)
 	case AMF0_NULL_TAG:
 		return amf_get_null(buf);
 	default:
-		ULOGE("Cannot skip tag type %u", tag);
+		ULOGE("cannot skip tag type %u", tag);
 		return -ENOSYS;
 	}
 }
