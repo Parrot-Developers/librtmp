@@ -25,7 +25,11 @@
  */
 #include "flv_reader.h"
 
-#include <arpa/inet.h>
+#ifdef _WIN32
+#	include <winsock2.h>
+#else
+#	include <arpa/inet.h>
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>

@@ -28,11 +28,17 @@
 #include "amf.h"
 #include "rtmp_chunk_stream.h"
 
-#include <arpa/inet.h>
+#ifdef _WIN32
+#	include <winsock2.h>
+#	include <ws2def.h>
+#	include <mswsock.h>
+#else
+#	include <arpa/inet.h>
+#	include <sys/socket.h>
+#endif
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/types.h>
 
 #include <aac/aac.h>
@@ -1041,15 +1047,6 @@ static int send_chunk(struct rtmp_chunk_stream *stream,
 	size_t full_len;
 	int iov_num = 0;
 	struct iovec iov[3];
-	struct msghdr msg = {
-		.msg_name = NULL,
-		.msg_namelen = 0,
-		.msg_iov = iov,
-		.msg_iovlen = 0 /* filled later */,
-		.msg_control = NULL,
-		.msg_controllen = 0,
-		.msg_flags = 0,
-	};
 	size_t rem_dh_len;
 	size_t chunk_dh_len = 0;
 	size_t rem_data_len;
@@ -1107,7 +1104,6 @@ data:
 	/* No need to update already_sent here */
 
 	/* Do the send */
-	msg.msg_iovlen = iov_num;
 #ifdef MSG_NOSIGNAL
 	flags = MSG_NOSIGNAL;
 #else

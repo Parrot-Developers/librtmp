@@ -29,20 +29,24 @@
 #include "rtmp_chunk_stream.h"
 #include "rtmp_internal.h"
 
-#include <arpa/inet.h>
+#ifdef _WIN32
+#	include <winsock2.h>
+#else
+#	include <arpa/inet.h>
+#	include <netdb.h>
+#	include <netinet/in.h>
+#	include <sys/socket.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <libpomp.h>
-#include <netdb.h>
-#include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 

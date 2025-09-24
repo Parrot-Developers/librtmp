@@ -22,6 +22,11 @@ LOCAL_LIBRARIES := \
 	libtransport-tls \
 	libulog
 
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_CFLAGS += -D_WIN32_WINNT=0x0600
+  LOCAL_LDLIBS += -lws2_32
+endif
+
 include $(BUILD_LIBRARY)
 
 

@@ -25,7 +25,11 @@
  */
 #include "amf.h"
 
-#include <arpa/inet.h>
+#ifdef _WIN32
+#	include <winsock2.h>
+#else
+#	include <arpa/inet.h>
+#endif
 #include <errno.h>
 #include <stdarg.h>
 #include <string.h>
@@ -75,6 +79,20 @@ static int amf_put_ecma_start(struct rtmp_buffer *buf, uint32_t len);
 static int amf_put_null(struct rtmp_buffer *buf);
 
 static int amf_put_object_end(struct rtmp_buffer *buf);
+
+
+#ifdef _WIN32
+static char *strndup(const char *s, size_t n)
+{
+	size_t len = strnlen(s, n);
+	char *p = malloc(len + 1);
+	if (p) {
+		memcpy(p, s, len);
+		p[len] = '\0';
+	}
+	return p;
+}
+#endif
 
 
 /* Encoder API */
