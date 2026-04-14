@@ -74,14 +74,14 @@ static void test_rtmp_anonymize_url(void)
 		 "rtmp://AaBbCcDdEeFf.wowza.com/ap********Dd/Ee****Hh"},
 	};
 
-	ret = rtmp_anonymize_uri(NULL, NULL);
+	ret = rtmp_anonymize_url(NULL, NULL);
 	CU_ASSERT_EQUAL(ret, -EINVAL);
 	CU_ASSERT_PTR_NULL(anonymized);
 
 	/* KO */
 	for (size_t i = 0; i < ARRAY_SIZE(test_cases_ko_map); i++) {
 		anonymized = NULL;
-		ret = rtmp_anonymize_uri(test_cases_ko_map[i].url, &anonymized);
+		ret = rtmp_anonymize_url(test_cases_ko_map[i].url, &anonymized);
 		CU_ASSERT_EQUAL(ret, -EPROTO);
 		CU_ASSERT_PTR_NULL(anonymized);
 	}
@@ -89,7 +89,7 @@ static void test_rtmp_anonymize_url(void)
 	/* OK */
 	for (size_t i = 0; i < ARRAY_SIZE(test_cases_ok_map); i++) {
 		anonymized = NULL;
-		ret = rtmp_anonymize_uri(test_cases_ok_map[i].url, &anonymized);
+		ret = rtmp_anonymize_url(test_cases_ok_map[i].url, &anonymized);
 		CU_ASSERT_EQUAL(ret, 0);
 		CU_ASSERT_PTR_NOT_NULL(anonymized);
 		CU_ASSERT_STRING_EQUAL(anonymized, test_cases_ok_map[i].anon);

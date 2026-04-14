@@ -116,17 +116,17 @@ RTMP_API const char *rtmp_client_disconnection_reason_str(
 
 
 /**
- * Anonymize an RTMP URI.
+ * Anonymize an RTMP URL.
  *
  * The returned string is allocated by the function and it is up to the caller
  * to free it when no longer needed.
  *
- * @param uri: URI to anonymize
- * @param anonymized: the anonymized URI (output)
+ * @param url: URL to anonymize
+ * @param anonymized: the anonymized URL (output)
  *
  * @return 0 on success, negative errno on error.
  */
-RTMP_API int rtmp_anonymize_uri(const char *uri, char **anonymized);
+RTMP_API int rtmp_anonymize_url(const char *url, char **anonymized);
 
 
 /**
@@ -381,6 +381,21 @@ RTMP_API int rtmp_client_send_audio_data(struct rtmp_client *client,
 					 size_t len,
 					 uint32_t timestamp,
 					 void *frame_userdata);
+
+
+/**
+ * Set the socket transmit buffer size (SO_SNDBUF).
+ *
+ * This function adjusts the kernel-level network buffer size for the
+ * RTMP connection.
+ *
+ * @param client: the rtmp_client instance.
+ * @param size: new transmit buffer size in bytes.
+ *
+ * @return 0 on success, or a negative errno value in case of error.
+ */
+RTMP_API int rtmp_client_set_socket_txbuf_size(struct rtmp_client *client,
+					       size_t size);
 
 
 #ifdef __cplusplus

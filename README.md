@@ -24,8 +24,8 @@ Two samples are provided:
 * _rtmp_test_mp4_
 * _rtmp_test_flv_
 
-Both samples take a video file (.mp4 or .flv) and a RTSP uri as their
-arguments, and will stream the file in loop to this URI.
+Both samples take a video file (.mp4 or .flv) and a RTSP URL as their
+arguments, and will stream the file in loop to this URL.
 
 For .mp4 files, a dummy empty audio track is used, for .flv files, an
 audio track must be present in the file.

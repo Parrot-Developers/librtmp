@@ -30,8 +30,6 @@ endif
 include $(BUILD_LIBRARY)
 
 
-ifeq ("$(TARGET_OS_FLAVOUR)","native")
-
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := rtmp_test_flv
@@ -39,6 +37,11 @@ LOCAL_SRC_FILES := \
 	tools/rtmp_test_flv.c \
 	tools/flv_reader.c
 LOCAL_LIBRARIES := librtmp libpomp libulog
+
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
+endif
+
 include $(BUILD_EXECUTABLE)
 
 
@@ -51,8 +54,6 @@ LOCAL_SRC_FILES := \
 LOCAL_LIBRARIES := librtmp libpomp libulog libmp4
 
 include $(BUILD_EXECUTABLE)
-
-endif
 
 
 ifdef TARGET_TEST

@@ -23,7 +23,9 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#include <execinfo.h>
+#if !defined(_WIN32) && !defined(__ANDROID__)
+#	include <execinfo.h>
+#endif
 
 #include <errno.h>
 #include <libpomp.h>
@@ -179,7 +181,6 @@ static const struct flv_reader_cbs flv_cbs = {
 
 static struct rtmp_test_ctx ctx;
 
-
 static void sighandler(int signal)
 {
 	if (ctx.run)
@@ -190,19 +191,23 @@ static void sighandler(int signal)
 }
 
 
+#ifndef _WIN32
 static void sighandler_pipe(int signal)
 {
+	fprintf(stderr, "Error: signal %d:\n", signal);
+
+#	ifndef __ANDROID__
 	void *array[30];
 	size_t size;
-
 	size = backtrace(array, 30);
 
 	/* print out all the frames to stderr */
-	fprintf(stderr, "Error: signal %d:\n", signal);
 	backtrace_symbols_fd(array, size, STDERR_FILENO);
+#	endif
+
 	exit(1);
 }
-
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -225,8 +230,9 @@ int main(int argc, char *argv[])
 	ctx.run = 1;
 
 	signal(SIGINT, sighandler);
+#ifndef _WIN32
 	signal(SIGPIPE, sighandler_pipe);
-
+#endif
 	ctx.loop = pomp_loop_new();
 	if (!ctx.loop) {
 		ULOG_ERRNO("pomp_loop_new", ENOMEM);

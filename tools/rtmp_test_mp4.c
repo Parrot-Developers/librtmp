@@ -23,7 +23,10 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#include <execinfo.h>
+
+#if !defined(_WIN32) && !defined(__ANDROID__)
+#	include <execinfo.h>
+#endif
 
 #include <errno.h>
 #include <libpomp.h>
@@ -214,6 +217,7 @@ static void sighandler(int signal)
 }
 
 
+#if !defined(_WIN32) && !defined(__ANDROID__)
 static void sighandler_pipe(int signal)
 {
 	void *array[30];
@@ -226,6 +230,7 @@ static void sighandler_pipe(int signal)
 	backtrace_symbols_fd(array, size, STDERR_FILENO);
 	exit(1);
 }
+#endif
 
 
 int main(int argc, char *argv[])
@@ -249,8 +254,9 @@ int main(int argc, char *argv[])
 	ctx.run = 1;
 
 	signal(SIGINT, sighandler);
+#if !defined(_WIN32) && !defined(__ANDROID__)
 	signal(SIGPIPE, sighandler_pipe);
-
+#endif
 	ctx.loop = pomp_loop_new();
 	if (!ctx.loop) {
 		ULOG_ERRNO("pomp_loop_new", ENOMEM);

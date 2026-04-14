@@ -31,10 +31,12 @@
 
 #ifdef _WIN32
 #	include <winsock2.h>
+#	define IPTOS_PREC_FLASHOVERRIDE 0x80
 #else
 #	include <arpa/inet.h>
 #	include <netdb.h>
 #	include <netinet/in.h>
+#	include <netinet/ip.h>
 #	include <sys/socket.h>
 #endif
 #include <errno.h>
@@ -190,7 +192,7 @@ struct rtmp_client {
 	enum rtmp_client_disconnection_reason disconnection_reason;
 
 	/* RTMP Address */
-	char *uri;
+	char *url;
 	char *host;
 	int port;
 	char *app;
@@ -200,6 +202,10 @@ struct rtmp_client {
 	bool secure;
 	SSL_CTX *ssl_ctx;
 	struct tskt_socket *tsock;
+
+	struct {
+		size_t txbuf_size;
+	} sock_params;
 
 	/* Chunk stream reader/writer */
 	struct rtmp_chunk_stream *stream;
@@ -273,8 +279,11 @@ static int send_full(struct rtmp_client *client, void *buf, size_t len)
 		return -EINVAL;
 
 	ret = tskt_socket_write(client->tsock, buf, len);
-	if (ret < 0)
-		return -errno;
+	if (ret < 0) {
+		ret = -errno;
+		ULOG_ERRNO("tskt_socket_write", -ret);
+		return ret;
+	}
 	if ((size_t)ret != len)
 		return -EIO;
 	return 0;
@@ -437,7 +446,7 @@ void rtmp_client_destroy(struct rtmp_client *client)
 	if (client->tskt_resolv != NULL)
 		tskt_resolv_unref(client->tskt_resolv);
 
-	free(client->uri);
+	free(client->url);
 	free(client->host);
 	free(client->app);
 	free(client->key);
@@ -951,7 +960,7 @@ static const struct rtmp_chunk_cbs chunk_cbs = {
 };
 
 
-static int parse_uri(const char *uri,
+static int parse_url(const char *url,
 		     bool *secure,
 		     char **host,
 		     uint16_t *port,
@@ -966,22 +975,22 @@ static int parse_uri(const char *uri,
 	uint16_t _port;
 	uint32_t offset = 7;
 
-	ULOG_ERRNO_RETURN_ERR_IF(uri == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(url == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(secure == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(host == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(port == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(app == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(key == NULL, EINVAL);
 
-	if (strncmp(uri, "rtmps://", 8) == 0) {
+	if (strncmp(url, "rtmps://", 8) == 0) {
 		_secure = true;
 		offset = 8;
 	}
 
-	if ((strncmp(uri, "rtmp://", 7) != 0) && !_secure)
+	if ((strncmp(url, "rtmp://", 7) != 0) && !_secure)
 		return -EPROTO;
 
-	raw = xstrdup(&uri[offset]);
+	raw = xstrdup(&url[offset]);
 	if (!raw) {
 		ret = -ENOMEM;
 		goto exit;
@@ -1033,8 +1042,8 @@ exit:
 }
 
 
-static int process_uri(struct rtmp_client *client,
-		       const char *uri,
+static int process_url(struct rtmp_client *client,
+		       const char *url,
 		       uint16_t *port,
 		       struct in_addr *addr)
 {
@@ -1044,13 +1053,13 @@ static int process_uri(struct rtmp_client *client,
 	uint16_t _port = 0;
 	char *app = NULL, *key = NULL;
 
-	ULOG_ERRNO_RETURN_ERR_IF(uri == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(url == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(port == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(addr == NULL, EINVAL);
 
-	ret = parse_uri(uri, &secure, &host, &_port, &app, &key);
+	ret = parse_url(url, &secure, &host, &_port, &app, &key);
 	if (ret < 0) {
-		ULOG_ERRNO("parse_uri", -ret);
+		ULOG_ERRNO("parse_url", -ret);
 		goto exit;
 	}
 
@@ -1059,7 +1068,7 @@ static int process_uri(struct rtmp_client *client,
 
 	*port = htons(_port);
 	client->secure = secure;
-	client->uri = strdup(uri);
+	client->url = strdup(url);
 	client->host = host;
 	client->port = _port;
 	client->app = app;
@@ -1103,7 +1112,8 @@ static void handle_wait_tcp(struct rtmp_client *client)
 	if (!client)
 		return;
 
-	(void)tskt_socket_update_events(client->tsock, POMP_FD_EVENT_IN, 0);
+	(void)tskt_socket_update_events(
+		client->tsock, POMP_FD_EVENT_IN, POMP_FD_EVENT_OUT);
 
 	set_state(client, RTMP_CONN_WAIT_S0);
 
@@ -1340,6 +1350,11 @@ tskt_event_cb(struct tskt_socket *sock, uint32_t revents, void *userdata)
 		case RTMP_CONN_WAIT_TCP:
 			handle_wait_tcp(client);
 			break;
+		default:
+			break;
+		}
+	} else if (revents & POMP_FD_EVENT_IN) {
+		switch (client->state) {
 		case RTMP_CONN_WAIT_S0:
 			handle_wait_s0(client);
 			break;
@@ -1375,7 +1390,7 @@ int rtmp_client_connect(struct rtmp_client *client, const char *url)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
-	return process_uri(client, url, &addr.sin_port, &addr.sin_addr);
+	return process_url(client, url, &addr.sin_port, &addr.sin_addr);
 }
 
 
@@ -1643,6 +1658,48 @@ int rtmp_client_send_audio_data(struct rtmp_client *client,
 }
 
 
+static int set_socket_txbuf_size(struct rtmp_client *client,
+				 struct tskt_socket *sock)
+{
+	int ret;
+
+	if (client->sock_params.txbuf_size == 0)
+		return 0;
+
+	ret = tskt_socket_set_txbuf_size(sock, client->sock_params.txbuf_size);
+	if (ret < 0) {
+		ULOGW_ERRNO(-ret, "tskt_socket_set_txbuf_size");
+		return ret;
+	}
+	ret = tskt_socket_get_txbuf_size(sock);
+	if (ret < 0) {
+		ULOGW_ERRNO(-ret, "tskt_socket_get_txbuf_size");
+		return ret;
+	}
+	if ((size_t)ret != 2 * client->sock_params.txbuf_size) {
+		ULOGW("failed to set tx buffer size: got %d, expecting %zu",
+		      ret / 2,
+		      client->sock_params.txbuf_size);
+		return -ENOSYS;
+	}
+
+	return 0;
+}
+
+
+int rtmp_client_set_socket_txbuf_size(struct rtmp_client *client, size_t size)
+{
+	ULOG_ERRNO_RETURN_ERR_IF(client == NULL, EINVAL);
+
+	client->sock_params.txbuf_size = size;
+
+	if (client->tsock == NULL)
+		return 0;
+
+	return set_socket_txbuf_size(client, client->tsock);
+}
+
+
 static char *anonymize_str(const char *str)
 {
 	size_t len;
@@ -1664,11 +1721,11 @@ static char *anonymize_str(const char *str)
 }
 
 
-int rtmp_anonymize_uri(const char *uri, char **anonymized)
+int rtmp_anonymize_url(const char *url, char **anonymized)
 {
 	int ret;
 
-	ULOG_ERRNO_RETURN_ERR_IF(uri == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(url == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(anonymized == NULL, EINVAL);
 
 	bool secure = false;
@@ -1680,9 +1737,9 @@ int rtmp_anonymize_uri(const char *uri, char **anonymized)
 	char *anonymized_app = NULL;
 	char *anonymized_key = NULL;
 
-	ret = parse_uri(uri, &secure, &host, &_port, &app, &key);
+	ret = parse_url(url, &secure, &host, &_port, &app, &key);
 	if (ret < 0) {
-		ULOG_ERRNO("parse_uri", -ret);
+		ULOG_ERRNO("parse_url", -ret);
 		goto out;
 	}
 
@@ -1738,7 +1795,7 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 	int fd = -1;
 	struct tskt_socket *tsock = NULL;
 	struct rtmp_client *client = (struct rtmp_client *)userdata;
-	char *anonymized_uri = NULL;
+	char *anonymized_url = NULL;
 	char *anonymized_app = NULL, *anonymized_key = NULL;
 #ifdef SO_NOSIGPIPE
 	int flags = 1;
@@ -1755,9 +1812,9 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 		goto error;
 	}
 
-	err = rtmp_anonymize_uri(client->uri, &anonymized_uri);
+	err = rtmp_anonymize_url(client->url, &anonymized_url);
 	if (err < 0) {
-		ULOG_ERRNO("rtmp_anonymize_uri", -err);
+		ULOG_ERRNO("rtmp_anonymize_url", -err);
 		goto error;
 	}
 
@@ -1765,39 +1822,57 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 	anonymized_key = anonymize_str(client->key);
 
 	ULOGI("address resolution:");
-	ULOGI("input (anonymized): '%s'", anonymized_uri);
+	ULOGI("input (anonymized): '%s'", anonymized_url);
 	ULOGI("host              : '%s'", client->host);
 	ULOGI("resolved address  : '%s'", addrs[0]);
 	ULOGI("resolved port     : %hu", client->port);
 	ULOGI("app (anonymized)  : '%s'", anonymized_app);
 	ULOGI("key (anonymized)  : '%s'", anonymized_key);
-	free(anonymized_uri);
+	free(anonymized_url);
 	free(anonymized_app);
 	free(anonymized_key);
 
 	/* create tcp socket */
 	err = tskt_socket_new_tcp(client->loop, &tsock);
-	if (err < 0)
+	if (err < 0) {
+		ULOG_ERRNO("tskt_socket_new_tcp", -err);
 		goto error;
+	}
+
+	err = tskt_socket_set_class_selector(tsock, IPTOS_PREC_FLASHOVERRIDE);
+	if (err < 0)
+		ULOGW_ERRNO(-err, "tskt_socket_set_class_selector");
+
+	err = tskt_socket_set_nodelay(tsock, 1);
+	if (err < 0)
+		ULOGW_ERRNO(-err, "tskt_socket_set_nodelay");
+
+	(void)set_socket_txbuf_size(client, tsock);
 
 	/* connect to server */
 	err = tskt_socket_connect(tsock, NULL, 0, addrs[0], client->port);
-	if (err < 0)
+	if (err < 0) {
+		ULOG_ERRNO("tskt_socket_connect", -err);
 		goto error;
+	}
 
 	fd = tskt_socket_get_fd(tsock);
 
 	if (client->secure) {
 		OPENSSL_init_ssl(0, NULL);
 		err = ttls_init();
-		if (err < 0)
+		if (err < 0) {
+			ULOG_ERRNO("ttls_init", -err);
 			goto error;
+		}
 		tls_init = true;
 
 		/* create TLS client context */
 		client->ssl_ctx = SSL_CTX_new(TLS_client_method());
-		if (client->ssl_ctx == NULL)
+		if (client->ssl_ctx == NULL) {
+			ULOGE("SSL_CTX_new");
 			goto error;
+		}
 	}
 
 #ifdef SO_NOSIGPIPE
@@ -1805,6 +1880,7 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 	err = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &flags, sizeof(flags));
 	if (err != 0) {
 		err = -errno;
+		ULOG_ERRNO("setsockopt", -err);
 		goto error;
 	}
 #endif
@@ -1816,18 +1892,24 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 		/* create TLS socket */
 		err = ttls_socket_new_with_ctx(
 			client->ssl_ctx, tsock, &client->tsock);
-		if (err < 0)
+		if (err < 0) {
+			ULOG_ERRNO("ttls_socket_new_with_ctx", -err);
 			goto error;
+		}
 	} else {
 		client->tsock = tsock;
 	}
 	tsock = NULL;
 
 	/* monitor i/o events */
-	err = tskt_socket_set_event_cb(
-		client->tsock, POMP_FD_EVENT_OUT, tskt_event_cb, client);
-	if (err < 0)
+	err = tskt_socket_set_event_cb(client->tsock,
+				       POMP_FD_EVENT_OUT | POMP_FD_EVENT_IN,
+				       tskt_event_cb,
+				       client);
+	if (err < 0) {
+		ULOG_ERRNO("tskt_socket_set_event_cb", -err);
 		goto error;
+	}
 
 	set_state(client, RTMP_CONN_WAIT_TCP);
 	return;
