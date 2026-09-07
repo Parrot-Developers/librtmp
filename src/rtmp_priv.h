@@ -23,53 +23,16 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef _MP4_READER_H_
-#define _MP4_READER_H_
+#ifndef _RTMP_PRIV_H_
+#define _RTMP_PRIV_H_
 
-#include <inttypes.h>
-#include <stdio.h>
+#include <rtmp.h>
 
-struct pomp_loop;
-struct pomp_timer;
+#ifdef TARGET_TEST
+void rtmp_client_trigger_dns_timeout_for_test(struct rtmp_client *client);
+void rtmp_client_trigger_chunk_stream_watchdog_for_test(
+	struct rtmp_client *client);
+void rtmp_client_trigger_dns_failure_for_test(struct rtmp_client *client);
+#endif
 
-
-enum mp4_data_type {
-	MP4_AVCC,
-	MP4_ASC,
-	MP4_VIDEO,
-	MP4_AUDIO,
-};
-
-
-struct mp4_reader_cbs {
-	void (*config_cb)(double duration,
-			  int width,
-			  int height,
-			  double framerate,
-			  int audiosamplerate,
-			  int audiosamplesize,
-			  void *userdata);
-	void (*element_cb)(const uint8_t *buffer,
-			   size_t len,
-			   enum mp4_data_type type,
-			   uint32_t timestamp,
-			   void *userdata);
-	void (*eof_cb)(void *userdata);
-};
-
-
-struct mp4_reader;
-
-
-struct mp4_reader *mp4_open_file(const char *path,
-				 struct pomp_loop *loop,
-				 const struct mp4_reader_cbs *cbs,
-				 void *userdata);
-void mp4_close_file(struct mp4_reader *r);
-
-int mp4_start_read(struct mp4_reader *r, int loop);
-
-const char *mp4_data_type_str(enum mp4_data_type type);
-
-
-#endif /* _MP4_READER_H_ */
+#endif /* _RTMP_PRIV_H_ */

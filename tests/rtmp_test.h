@@ -45,6 +45,9 @@
 
 
 extern CU_TestInfo g_rtmp_test_utils[];
+extern CU_TestInfo g_rtmp_test_amf[];
+extern CU_TestInfo g_rtmp_test_chunk_stream[];
+extern CU_TestInfo g_rtmp_test_client[];
 
 
 #endif /* _RTMP_TEST_H_ */

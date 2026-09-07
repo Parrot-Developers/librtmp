@@ -8,6 +8,8 @@
 #include <ulog.h>
 ULOG_DECLARE_TAG(mp4_reader);
 
+#define UNUSED(x) (void)(x)
+
 static uint8_t dummy_audio_specific_config[] = {0x12, 0x10, 0x56, 0xe5, 0x00};
 static uint8_t dummy_audio_sample[] = {0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c};
 static int dummy_audiosamplerate = 44100;
@@ -60,11 +62,14 @@ const char *mp4_data_type_str(enum mp4_data_type type)
 
 static void video_timer_cb(struct pomp_timer *timer, void *userdata)
 {
+	UNUSED(timer);
+
 	int ret;
 	struct mp4_reader *r = userdata;
 	struct mp4_track_sample ts;
 	uint32_t frame_ts;
-	uint32_t dts_ms, next_dts_ms;
+	uint32_t dts_ms;
+	uint32_t next_dts_ms;
 
 	ret = mp4_demux_get_track_sample(r->demux,
 					 r->video_track_id,
@@ -125,11 +130,14 @@ static void video_timer_cb(struct pomp_timer *timer, void *userdata)
 
 static void audio_timer_cb(struct pomp_timer *timer, void *userdata)
 {
+	UNUSED(timer);
+
 	int ret;
 	struct mp4_reader *r = userdata;
 	struct mp4_track_sample ts;
 	uint32_t frame_ts;
-	uint32_t dts_ms, next_dts_ms;
+	uint32_t dts_ms;
+	uint32_t next_dts_ms;
 
 	if (r->dummy_audio) {
 		r->cbs.element_cb(dummy_audio_sample,
@@ -182,8 +190,8 @@ struct mp4_reader *mp4_open_file(const char *path,
 	int ret;
 	struct mp4_reader *r;
 	int track_count;
-	int track;
-	int found_video = 0, found_audio = 0;
+	int found_video = 0;
+	int found_audio = 0;
 
 	if (!path || !loop || !cbs || !cbs->config_cb || !cbs->element_cb ||
 	    !cbs->eof_cb) {
@@ -235,7 +243,7 @@ struct mp4_reader *mp4_open_file(const char *path,
 
 	/* search audio/video tracks in MP4 */
 	track_count = mp4_demux_get_track_count(r->demux);
-	for (track = 0; track < track_count; track++) {
+	for (int track = 0; track < track_count; track++) {
 		struct mp4_track_info info;
 		mp4_demux_get_track_info(r->demux, track, &info);
 		if (info.type == MP4_TRACK_TYPE_VIDEO) {

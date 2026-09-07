@@ -77,12 +77,14 @@ static enum flv_data_type get_data_type(uint8_t raw)
 	case 18:
 		t = FLV_META;
 		break;
+	default:
+		break;
 	}
 	return t;
 }
 
 
-static uint32_t get_tag_ts(uint8_t *tag)
+static uint32_t get_tag_ts(const uint8_t *tag)
 {
 	uint32_t ts;
 
@@ -95,7 +97,7 @@ static uint32_t get_tag_ts(uint8_t *tag)
 }
 
 
-static size_t get_tag_len(uint8_t *tag)
+static size_t get_tag_len(const uint8_t *tag)
 {
 	size_t len;
 

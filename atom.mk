@@ -62,12 +62,35 @@ include $(CLEAR_VARS)
 
 LOCAL_MODULE := tst-librtmp
 LOCAL_CFLAGS += -DTARGET_TEST -D_GNU_SOURCE
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/include $(LOCAL_PATH)/src
+# librtmp's internals (amf.c/rtmp_chunk_stream.c/rtmp.c) are hidden
+# (-fvisibility=hidden) in librtmp.so, so they are compiled directly into
+# this test binary instead of linking librtmp itself.
 LOCAL_SRC_FILES := \
+	src/amf.c \
+	src/rtmp.c \
+	src/rtmp_chunk_stream.c \
+	tests/rtmp_test_amf.c \
+	tests/rtmp_test_chunk_stream.c \
+	tests/rtmp_test_client.c \
 	tests/rtmp_test_utils.c \
 	tests/rtmp_test.c
 LOCAL_LIBRARIES := \
+	libaac \
+	libaudio-defs \
+	libcrypto \
 	libcunit \
-	librtmp
+	libfutils \
+	libpomp \
+	libtransport-packet \
+	libtransport-socket \
+	libtransport-tls \
+	libulog
+
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_CFLAGS += -D_WIN32_WINNT=0x0600
+  LOCAL_LDLIBS += -lws2_32
+endif
 
 include $(BUILD_EXECUTABLE)
 

@@ -52,28 +52,39 @@ struct rtmp_chunk_stream *new_chunk_stream(struct pomp_loop *loop,
 int set_chunk_size(struct rtmp_chunk_stream *stream, uint32_t chunk_size);
 
 int send_metadata(struct rtmp_chunk_stream *stream,
-		  struct rtmp_buffer *data,
+		  const struct rtmp_buffer *data,
 		  uint32_t timestamp,
 		  int internal,
 		  void *frame_userdata);
 int send_video_frame(struct rtmp_chunk_stream *stream,
-		     struct rtmp_buffer *frame,
+		     const struct rtmp_buffer *frame,
 		     uint32_t timestamp,
 		     int is_meta,
 		     int is_key,
 		     void *frame_userdata);
 int send_audio_data(struct rtmp_chunk_stream *stream,
-		    struct rtmp_buffer *data,
+		    const struct rtmp_buffer *data,
 		    uint32_t timestamp,
 		    int is_meta,
 		    void *frame_userdata);
-int send_amf_message(struct rtmp_chunk_stream *stream, struct rtmp_buffer *msg);
+int send_amf_message(struct rtmp_chunk_stream *stream,
+		     const struct rtmp_buffer *msg);
 
 int flush_chunk_stream(struct rtmp_chunk_stream *stream);
 
 int delete_chunk_stream(struct rtmp_chunk_stream *stream);
 
 int store_message_stream_id(struct rtmp_chunk_stream *stream, uint32_t msid);
+
+
+#ifdef TARGET_TEST
+void rtmp_chunk_stream_trigger_watchdog_for_test(
+	struct rtmp_chunk_stream *stream);
+int rtmp_chunk_stream_send_data_for_test(struct rtmp_chunk_stream *stream,
+					 int csid,
+					 uint8_t mtid,
+					 size_t data_len);
+#endif
 
 
 #endif /* _RTMP_CHUNK_STREAM_H_ */

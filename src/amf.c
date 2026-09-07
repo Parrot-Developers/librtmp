@@ -101,7 +101,9 @@ int amf_encode(struct rtmp_buffer *buffer, const char *fmt, ...)
 {
 	va_list ap;
 
-	char c, d, e;
+	char c;
+	char d;
+	char e;
 	int ret = 0;
 
 	int objcount = 0;
@@ -148,7 +150,7 @@ int amf_encode(struct rtmp_buffer *buffer, const char *fmt, ...)
 					ret = -EINVAL;
 					break;
 				}
-				boolean = va_arg(ap, unsigned int);
+				boolean = (uint8_t) !!va_arg(ap, unsigned int);
 				ret = amf_put_boolean(buffer, boolean);
 				break;
 			case 's':
@@ -307,7 +309,6 @@ static int amf_put_number(struct rtmp_buffer *buf, double value)
 
 	buf->buf[buf->len] = AMF0_NUMBER_TAG;
 
-
 	value_ne = htonll(v.u);
 
 	memcpy(&buf->buf[buf->len + 1], &value_ne, sizeof(value_ne));
@@ -349,9 +350,11 @@ static int amf_put_string_internal(struct rtmp_buffer *buf,
 	if (slen <= UINT16_MAX) {
 		tag = AMF0_STRING_TAG;
 		stroffset = AMF0_STRING_LEN_BASE;
-	} else {
+	} else if (slen <= UINT32_MAX) {
 		tag = AMF0_LONG_STRING_TAG;
 		stroffset = AMF0_LONG_STRING_LEN_BASE;
+	} else {
+		return -EOVERFLOW;
 	}
 	lenoffset = 1;
 	if (!put_tag) {
@@ -366,12 +369,12 @@ static int amf_put_string_internal(struct rtmp_buffer *buf,
 	if (put_tag)
 		buf->buf[buf->len] = tag;
 	if (tag == AMF0_STRING_TAG) {
-		uint16_t slen_ne = htons(slen);
+		uint16_t slen_ne = htons((uint16_t)slen);
 		memcpy(&buf->buf[buf->len + lenoffset],
 		       &slen_ne,
 		       sizeof(slen_ne));
 	} else {
-		uint32_t slen_ne = htonl(slen);
+		uint32_t slen_ne = htonl((uint32_t)slen);
 		memcpy(&buf->buf[buf->len + lenoffset],
 		       &slen_ne,
 		       sizeof(slen_ne));
@@ -535,6 +538,12 @@ static ssize_t amf_get_stringp(struct rtmp_buffer *buf,
 		return -EBADMSG;
 	}
 
+	/* Make sure the length field itself is fully within the buffer
+	 * before reading it (the upfront 2-byte check above is only
+	 * enough for the short-string case) */
+	if (buf->rd + size_offset + size_len > buf->len)
+		return -ENOMEM;
+
 	if (size_len == 2) {
 		uint16_t val_ne;
 		memcpy(&val_ne, &buf->buf[buf->rd + size_offset], size_len);
@@ -566,7 +575,7 @@ int amf_get_string(struct rtmp_buffer *buf, char **string)
 
 	data_len = amf_get_stringp(buf, &stringp, &string_len, 1);
 	if (data_len < 0)
-		return data_len;
+		return (int)data_len;
 
 	buf->rd += data_len;
 
@@ -589,7 +598,7 @@ int amf_get_property(struct rtmp_buffer *buf, char **key)
 
 	data_len = amf_get_stringp(buf, &stringp, &string_len, 0);
 	if (data_len < 0)
-		return data_len;
+		return (int)data_len;
 
 	buf->rd += data_len;
 
@@ -674,7 +683,10 @@ int amf_skip_data(struct rtmp_buffer *buf)
 	case AMF0_STRING_TAG:
 	case AMF0_LONG_STRING_TAG:
 		sret = amf_get_stringp(buf, &string, &len, 1);
-		return sret < 0 ? sret : 0;
+		if (sret < 0)
+			return (int)sret;
+		buf->rd += sret;
+		return 0;
 	case AMF0_NULL_TAG:
 		return amf_get_null(buf);
 	default:

@@ -42,7 +42,7 @@ enum flv_data_type {
 
 
 struct flv_reader_cbs {
-	void (*tag_cb)(uint8_t *buffer,
+	void (*tag_cb)(const uint8_t *buffer,
 		       size_t len,
 		       enum flv_data_type type,
 		       uint32_t timestamp,

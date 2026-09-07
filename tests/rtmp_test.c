@@ -29,6 +29,9 @@
 
 static CU_SuiteInfo s_suites[] = {
 	{FN("utils"), NULL, NULL, g_rtmp_test_utils},
+	{FN("amf"), NULL, NULL, g_rtmp_test_amf},
+	{FN("chunk-stream"), NULL, NULL, g_rtmp_test_chunk_stream},
+	{FN("client"), NULL, NULL, g_rtmp_test_client},
 
 	CU_SUITE_INFO_NULL,
 };

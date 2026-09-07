@@ -34,6 +34,8 @@
 
 #define DEFAULT_RTMP_PORT 1935
 
+#define UNUSED(x) (void)(x)
+
 
 /** To be used for all public API */
 #ifdef RTMP_API_EXPORTS

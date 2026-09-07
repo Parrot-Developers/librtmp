@@ -41,6 +41,8 @@
 #include <ulog.h>
 ULOG_DECLARE_TAG(rtmp_test);
 
+#define UNUSED(x) (void)(x)
+
 /* Define to 0 to skip RTMP connection & run only locally */
 #define DO_SEND 1
 
@@ -56,6 +58,8 @@ struct rtmp_test_ctx {
 
 static void socket_cb(int fd, void *userdata)
 {
+	UNUSED(userdata);
+
 	ULOGI("socket CB(%d)", fd);
 }
 
@@ -65,6 +69,8 @@ connection_state(enum rtmp_client_conn_state state,
 		 enum rtmp_client_disconnection_reason disconnection_reason,
 		 void *userdata)
 {
+	UNUSED(disconnection_reason);
+
 	struct rtmp_test_ctx *ctx = userdata;
 	ULOGI("connection state: %s", rtmp_client_conn_state_str(state));
 
@@ -88,12 +94,17 @@ connection_state(enum rtmp_client_conn_state state,
 
 static void peer_bw_changed(uint32_t bandwidth, void *userdata)
 {
+	UNUSED(userdata);
+
 	ULOGI("peer BW changed to %" PRIu32 " Bytes per second", bandwidth);
 }
 
 
 static void data_unref(uint8_t *data, void *buffer_userdata, void *userdata)
 {
+	UNUSED(data);
+	UNUSED(userdata);
+
 	free(buffer_userdata);
 }
 
@@ -138,7 +149,7 @@ static void mp4_config(double duration,
 }
 
 
-static void mp4_element(uint8_t *buffer,
+static void mp4_element(const uint8_t *buffer,
 			size_t len,
 			enum mp4_data_type type,
 			uint32_t timestamp,
@@ -209,6 +220,8 @@ static struct rtmp_test_ctx ctx;
 
 static void sighandler(int signal)
 {
+	UNUSED(signal);
+
 	if (ctx.run)
 		ctx.run = 0;
 	else
@@ -235,8 +248,8 @@ static void sighandler_pipe(int signal)
 
 int main(int argc, char *argv[])
 {
-	char *url;
-	char *mp4;
+	const char *url;
+	const char *mp4;
 
 	int ret;
 	int status_code = EXIT_SUCCESS;

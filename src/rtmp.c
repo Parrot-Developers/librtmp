@@ -28,6 +28,7 @@
 #include "amf.h"
 #include "rtmp_chunk_stream.h"
 #include "rtmp_internal.h"
+#include "rtmp_priv.h"
 
 #ifdef _WIN32
 #	include <winsock2.h>
@@ -194,7 +195,7 @@ struct rtmp_client {
 	/* RTMP Address */
 	char *url;
 	char *host;
-	int port;
+	uint16_t port;
 	char *app;
 	char *key;
 
@@ -270,7 +271,7 @@ static void set_state(struct rtmp_client *client,
 }
 
 
-static int send_full(struct rtmp_client *client, void *buf, size_t len)
+static int send_full(struct rtmp_client *client, const void *buf, size_t len)
 {
 	ssize_t ret;
 
@@ -282,7 +283,7 @@ static int send_full(struct rtmp_client *client, void *buf, size_t len)
 	if (ret < 0) {
 		ret = -errno;
 		ULOG_ERRNO("tskt_socket_write", -ret);
-		return ret;
+		return (int)ret;
 	}
 	if ((size_t)ret != len)
 		return -EIO;
@@ -326,7 +327,7 @@ static int send_c1(struct rtmp_client *client)
 }
 
 
-static int send_c2(struct rtmp_client *client, uint8_t *buf, size_t len)
+static int send_c2(struct rtmp_client *client, const uint8_t *buf, size_t len)
 {
 	if (!client || (client->tsock == NULL) || (buf == NULL) ||
 	    (len != HANDSHAKE_SIZE))
@@ -338,6 +339,8 @@ static int send_c2(struct rtmp_client *client, uint8_t *buf, size_t len)
 
 static void dns_timer_cb(struct pomp_timer *timer, void *userdata)
 {
+	UNUSED(timer);
+
 	struct rtmp_client *client = userdata;
 	int err = 0;
 
@@ -353,6 +356,34 @@ static void dns_timer_cb(struct pomp_timer *timer, void *userdata)
 	(void)rtmp_client_disconnect(client,
 				     RTMP_CLIENT_DISCONNECTION_REASON_TIMEOUT);
 }
+
+
+#ifdef TARGET_TEST
+void rtmp_client_trigger_dns_timeout_for_test(struct rtmp_client *client)
+{
+	if (client != NULL)
+		dns_timer_cb(NULL, client);
+}
+
+void rtmp_client_trigger_chunk_stream_watchdog_for_test(
+	struct rtmp_client *client)
+{
+	if (client != NULL && client->stream != NULL)
+		rtmp_chunk_stream_trigger_watchdog_for_test(client->stream);
+}
+
+void rtmp_client_trigger_dns_failure_for_test(struct rtmp_client *client)
+{
+	int err;
+	if (client == NULL)
+		return;
+	err = tskt_resolv_cancel(client->tskt_resolv,
+				 client->tskt_resolv_req_id);
+	if (err < 0)
+		ULOG_ERRNO("tskt_resolv_cancel", -err);
+	tskt_resolv_cb(NULL, 0, TSKT_RESOLV_ERROR_NONAME, 0, NULL, client);
+}
+#endif
 
 
 struct rtmp_client *rtmp_client_new(struct pomp_loop *loop,
@@ -526,15 +557,58 @@ server_error_to_client_disconnection_reason(const char *code, const char *desc)
 }
 
 
+static void parse_error_info(struct rtmp_buffer *data,
+			     char **desc,
+			     char **code,
+			     int *is_error)
+{
+	int err = 0;
+	char *value = NULL;
+	char *key = NULL;
+
+	while (1) {
+		free(key);
+		free(value);
+		value = NULL;
+		key = NULL;
+		err = amf_get_property(data, &key);
+		if (err != 0)
+			break;
+		if (key[0] == '\0')
+			break;
+		err = amf_get_string(data, &value);
+		if (err != 0) {
+			/* We only handle string value, skip other values */
+			amf_skip_data(data);
+			continue;
+		}
+
+		if (strcmp("level", key) == 0) {
+			*is_error = (strcmp("error", value) == 0);
+		} else if (strcmp("code", key) == 0) {
+			free(*code);
+			*code = xstrdup(value);
+		} else if (strcmp("description", key) == 0) {
+			free(*desc);
+			*desc = xstrdup(value);
+		}
+	}
+	free(key);
+	free(value);
+}
+
+
 /* Called from stream_consume_rcv_data loop, disconnection must be async */
 static void handle_error(struct rtmp_client *client,
 			 struct rtmp_buffer *data,
 			 const char *name,
 			 double id)
 {
+	UNUSED(name);
+	UNUSED(id);
+
 	enum rtmp_client_disconnection_reason disconnection_reason =
 		RTMP_CLIENT_DISCONNECTION_REASON_UNKNOWN;
-	char *key = NULL, *value = NULL;
 	char *code = NULL;
 	char *desc = NULL;
 	int is_error = 0;
@@ -554,31 +628,7 @@ static void handle_error(struct rtmp_client *client,
 		goto error;
 	}
 
-	while (1) {
-		free(key);
-		free(value);
-		key = value = NULL;
-		ret = amf_get_property(data, &key);
-		if (ret != 0)
-			break;
-		if (key[0] == '\0')
-			break;
-		ret = amf_get_string(data, &value);
-		if (ret != 0) {
-			/* We only handle string value, skip other values */
-			amf_skip_data(data);
-			continue;
-		}
-
-		if (strcmp("level", key) == 0)
-			is_error = (strcmp("error", value) == 0);
-		else if (strcmp("code", key) == 0)
-			code = xstrdup(value);
-		else if (strcmp("description", key) == 0)
-			desc = xstrdup(value);
-	}
-	free(key);
-	free(value);
+	parse_error_info(data, &desc, &code, &is_error);
 
 	if (is_error) {
 		ULOGE("server error: code: '%s', desc: '%s'",
@@ -619,10 +669,14 @@ error:
 
 /* Called from stream_consume_rcv_data loop, disconnection must be async */
 static void handle_connect_result(struct rtmp_client *client,
-				  struct rtmp_buffer *data,
+				  const struct rtmp_buffer *data,
 				  const char *name,
 				  double id)
 {
+	UNUSED(data);
+	UNUSED(name);
+	UNUSED(id);
+
 	double cmd_id;
 	int ret;
 
@@ -694,6 +748,9 @@ static void handle_create_stream_result(struct rtmp_client *client,
 					const char *name,
 					double id)
 {
+	UNUSED(name);
+	UNUSED(id);
+
 	int ret;
 	double cmd_id;
 	int32_t msid;
@@ -752,9 +809,11 @@ static void handle_status_update(struct rtmp_client *client,
 				 const char *name,
 				 double id)
 {
+	UNUSED(name);
+	UNUSED(id);
+
 	enum rtmp_client_disconnection_reason disconnection_reason =
 		RTMP_CLIENT_DISCONNECTION_REASON_UNKNOWN;
-	char *key = NULL, *value = NULL;
 	char *code = NULL;
 	char *desc = NULL;
 	int is_error = 0;
@@ -774,31 +833,7 @@ static void handle_status_update(struct rtmp_client *client,
 		goto error;
 	}
 
-	while (1) {
-		free(key);
-		free(value);
-		key = value = NULL;
-		ret = amf_get_property(data, &key);
-		if (ret != 0)
-			break;
-		if (key[0] == '\0')
-			break;
-		ret = amf_get_string(data, &value);
-		if (ret != 0) {
-			/* We only handle string value, skip other values */
-			amf_skip_data(data);
-			continue;
-		}
-
-		if (strcmp("level", key) == 0)
-			is_error = (strcmp("error", value) == 0);
-		else if (strcmp("code", key) == 0)
-			code = xstrdup(value);
-		else if (strcmp("description", key) == 0)
-			desc = xstrdup(value);
-	}
-	free(key);
-	free(value);
+	parse_error_info(data, &desc, &code, &is_error);
 
 	if (is_error) {
 		ULOGE("server error: code: '%s', desc: '%s'",
@@ -839,10 +874,14 @@ error:
 
 /* Called from stream_consume_rcv_data loop, disconnection must be async */
 static void handle_bwdone(struct rtmp_client *client,
-			  struct rtmp_buffer *data,
+			  const struct rtmp_buffer *data,
 			  const char *name,
 			  double id)
 {
+	UNUSED(data);
+	UNUSED(name);
+	UNUSED(id);
+
 	int ret;
 	double cmd_id;
 	ULOGI("handle onBWDone");
@@ -875,6 +914,10 @@ static void amf_msg(struct rtmp_buffer *data, void *userdata)
 	char *name;
 	double id;
 	name = amf_get_msg_name(data, &id);
+	if (name == NULL) {
+		ULOGW("malformed AMF message, cannot get message name");
+		return;
+	}
 
 	if (strcmp("_result", name) == 0) {
 		if (id == client->connect_id)
@@ -969,9 +1012,13 @@ static int parse_url(const char *url,
 {
 	int ret;
 	bool _secure = false;
-	char *raw, *tmp;
-	char *raw_addr, *_app, *_key;
-	char *_host, *port_s;
+	char *raw;
+	char *tmp;
+	char *raw_addr;
+	const char *_app;
+	const char *_key;
+	const char *_host;
+	const char *port_s;
 	uint16_t _port;
 	uint32_t offset = 7;
 
@@ -1045,13 +1092,14 @@ exit:
 static int process_url(struct rtmp_client *client,
 		       const char *url,
 		       uint16_t *port,
-		       struct in_addr *addr)
+		       const struct in_addr *addr)
 {
 	int ret = 0;
 	bool secure = false;
 	char *host = NULL;
 	uint16_t _port = 0;
-	char *app = NULL, *key = NULL;
+	char *app = NULL;
+	char *key = NULL;
 
 	ULOG_ERRNO_RETURN_ERR_IF(url == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(port == NULL, EINVAL);
@@ -1112,8 +1160,7 @@ static void handle_wait_tcp(struct rtmp_client *client)
 	if (!client)
 		return;
 
-	(void)tskt_socket_update_events(
-		client->tsock, POMP_FD_EVENT_IN, POMP_FD_EVENT_OUT);
+	(void)tskt_socket_update_events(client->tsock, POMP_FD_EVENT_IN, 0);
 
 	set_state(client, RTMP_CONN_WAIT_S0);
 
@@ -1320,6 +1367,8 @@ error:
 static void
 tskt_event_cb(struct tskt_socket *sock, uint32_t revents, void *userdata)
 {
+	UNUSED(sock);
+
 	struct rtmp_client *client = (struct rtmp_client *)userdata;
 	enum rtmp_client_disconnection_reason disconnection_reason =
 		RTMP_CLIENT_DISCONNECTION_REASON_UNKNOWN;
@@ -1350,11 +1399,6 @@ tskt_event_cb(struct tskt_socket *sock, uint32_t revents, void *userdata)
 		case RTMP_CONN_WAIT_TCP:
 			handle_wait_tcp(client);
 			break;
-		default:
-			break;
-		}
-	} else if (revents & POMP_FD_EVENT_IN) {
-		switch (client->state) {
 		case RTMP_CONN_WAIT_S0:
 			handle_wait_s0(client);
 			break;
@@ -1475,7 +1519,6 @@ int rtmp_client_send_metadata(struct rtmp_client *client,
 {
 	struct rtmp_buffer b;
 	int ret;
-	double fr;
 
 	ULOG_ERRNO_RETURN_ERR_IF(client == NULL, EINVAL);
 
@@ -1488,8 +1531,6 @@ int rtmp_client_send_metadata(struct rtmp_client *client,
 		return -ENOMEM;
 	b.len = 0;
 	b.rd = 0;
-
-	fr = (framerate == 0) ? 29.97 : framerate;
 
 	ret = amf_encode(&b,
 			 "%s[%d,%s:%f,%s:%f,%s:%f,%s:%f,"
@@ -1596,7 +1637,7 @@ int rtmp_client_send_video_frame(struct rtmp_client *client,
 		return -EAGAIN;
 
 	/* Check if we have an IDR NALU or not */
-	while (offset < len) {
+	while (offset + sizeof(nal_size) + 1 <= len) {
 		memcpy(&nal_size, &buf[offset], sizeof(nal_size));
 		nal_size = ntohl(nal_size);
 		nal_type = buf[offset + sizeof(nal_size)] & 0x1f;
@@ -1658,7 +1699,7 @@ int rtmp_client_send_audio_data(struct rtmp_client *client,
 }
 
 
-static int set_socket_txbuf_size(struct rtmp_client *client,
+static int set_socket_txbuf_size(const struct rtmp_client *client,
 				 struct tskt_socket *sock)
 {
 	int ret;
@@ -1731,7 +1772,8 @@ int rtmp_anonymize_url(const char *url, char **anonymized)
 	bool secure = false;
 	char *host = NULL;
 	uint16_t _port = 0;
-	char *app = NULL, *key = NULL;
+	char *app = NULL;
+	char *key = NULL;
 
 	char *anonymized_url = NULL;
 	char *anonymized_app = NULL;
@@ -1790,13 +1832,16 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 			   const char *const *addrs,
 			   void *userdata)
 {
+	UNUSED(self);
+	UNUSED(id);
+
 	int err = 0;
-	bool tls_init = false;
 	int fd = -1;
 	struct tskt_socket *tsock = NULL;
 	struct rtmp_client *client = (struct rtmp_client *)userdata;
 	char *anonymized_url = NULL;
-	char *anonymized_app = NULL, *anonymized_key = NULL;
+	char *anonymized_app = NULL;
+	char *anonymized_key = NULL;
 #ifdef SO_NOSIGPIPE
 	int flags = 1;
 #endif
@@ -1865,7 +1910,6 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 			ULOG_ERRNO("ttls_init", -err);
 			goto error;
 		}
-		tls_init = true;
 
 		/* create TLS client context */
 		client->ssl_ctx = SSL_CTX_new(TLS_client_method());
@@ -1902,10 +1946,8 @@ static void tskt_resolv_cb(struct tskt_resolv *self,
 	tsock = NULL;
 
 	/* monitor i/o events */
-	err = tskt_socket_set_event_cb(client->tsock,
-				       POMP_FD_EVENT_OUT | POMP_FD_EVENT_IN,
-				       tskt_event_cb,
-				       client);
+	err = tskt_socket_set_event_cb(
+		client->tsock, POMP_FD_EVENT_OUT, tskt_event_cb, client);
 	if (err < 0) {
 		ULOG_ERRNO("tskt_socket_set_event_cb", -err);
 		goto error;
